@@ -1,12 +1,9 @@
 import { EventEmitter } from 'events';
 import { createServer as createHttpsServer, Server as HttpsServer } from 'https';
 import { networkInterfaces } from 'os';
-import { randomUUID } from 'crypto';
 import { AddressInfo } from 'net';
 import { getLogger } from '@neo/logger';
 import { renderPhoneMicPage } from './PhoneMicPage';
-import type { ApprovedDevice } from './PhoneMicDeviceStore';
-import { getPhoneMicDeviceStore } from './PhoneMicDeviceStore';
 
 const logger = getLogger();
 
@@ -34,14 +31,6 @@ async function getTlsCredentials(): Promise<{ key: string; cert: string }> {
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export type PendingApprovalRequest = {
-  requestId: string;
-  deviceId: string;
-  deviceName: string;
-  userAgent: string;
-  requestedAt: number;
-};
-
 export type PhoneMicStatus = {
   running: boolean;
   port: number;
@@ -51,14 +40,11 @@ export type PhoneMicStatus = {
   chunksReceived: number;
   lastChunkAt: number | null;
   level: number;
-  pendingRequests: PendingApprovalRequest[];
-  approvedDevices: ApprovedDevice[];
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const DEFAULT_PORT = 8790;
-const APPROVAL_TIMEOUT_MS = 60_000; // 60 segundos para aprovar
 
 const getLanAddress = (): string => {
   const nets = networkInterfaces();
@@ -91,11 +77,6 @@ const calculatePcm16Level = (chunk: Buffer): { level: number; rms: number } => {
 
 // ─── PhoneMicServer ──────────────────────────────────────────────────────────
 
-type PendingEntry = PendingApprovalRequest & {
-  ws: any;
-  timeout: NodeJS.Timeout;
-};
-
 export class PhoneMicServer extends EventEmitter {
   private httpsServer: HttpsServer | null = null;
   private wss: any | null = null;
@@ -105,8 +86,6 @@ export class PhoneMicServer extends EventEmitter {
   private lastChunkAt: number | null = null;
   private level = 0;
   private clients = new Set<any>();
-  // Pending approval requests: requestId → PendingEntry
-  private pendingRequests = new Map<string, PendingEntry>();
 
   async start(port: number = DEFAULT_PORT): Promise<PhoneMicStatus> {
     if (this.httpsServer) return this.getStatus();
@@ -156,13 +135,6 @@ export class PhoneMicServer extends EventEmitter {
   }
 
   async stop(): Promise<PhoneMicStatus> {
-    // Cancel all pending approval requests
-    for (const [, entry] of this.pendingRequests) {
-      clearTimeout(entry.timeout);
-      try { entry.ws.close(1001, 'server stopped'); } catch { /* ignore */ }
-    }
-    this.pendingRequests.clear();
-
     this.clients.forEach((ws) => { try { ws.close(1001, 'server stopped'); } catch { /* ignore */ } });
     this.clients.clear();
 
@@ -176,49 +148,6 @@ export class PhoneMicServer extends EventEmitter {
     return this.getStatus();
   }
 
-  // ─── Approval flow ─────────────────────────────────────────────────────────
-
-  /** Called by IPC when user approves a device connection request */
-  resolveApproval(requestId: string, approved: boolean): void {
-    const entry = this.pendingRequests.get(requestId);
-    if (!entry) return;
-
-    clearTimeout(entry.timeout);
-    this.pendingRequests.delete(requestId);
-
-    if (approved) {
-      const store = getPhoneMicDeviceStore();
-      store.approve(entry.deviceId, entry.deviceName, entry.userAgent);
-      try {
-        entry.ws.send(JSON.stringify({ type: 'approved' }));
-      } catch { /* ws might have closed */ }
-      this.setupApprovedClient(entry.ws);
-      logger.info({ deviceId: entry.deviceId, deviceName: entry.deviceName }, 'PhoneMicServer: device approved');
-    } else {
-      try { entry.ws.close(1008, 'access denied'); } catch { /* ignore */ }
-      logger.info({ deviceId: entry.deviceId }, 'PhoneMicServer: device denied');
-    }
-
-    this.emitStatus();
-  }
-
-  /** Called by IPC when user revokes a previously approved device */
-  revokeDevice(deviceId: string): boolean {
-    const store = getPhoneMicDeviceStore();
-    const revoked = store.revoke(deviceId);
-
-    // Disconnect any active client with this deviceId
-    for (const ws of this.clients) {
-      if (ws._phoneMicDeviceId === deviceId) {
-        try { ws.close(1008, 'access revoked'); } catch { /* ignore */ }
-        this.clients.delete(ws);
-      }
-    }
-
-    this.emitStatus();
-    return revoked;
-  }
-
   // ─── Status ────────────────────────────────────────────────────────────────
 
   getStatus(): PhoneMicStatus {
@@ -226,7 +155,6 @@ export class PhoneMicServer extends EventEmitter {
       ? (this.httpsServer.address() as AddressInfo).port
       : this.port;
     const address = getLanAddress();
-    const store = getPhoneMicDeviceStore();
 
     return {
       running: Boolean(this.httpsServer),
@@ -236,75 +164,23 @@ export class PhoneMicServer extends EventEmitter {
       bytesReceived: this.bytesReceived,
       chunksReceived: this.chunksReceived,
       lastChunkAt: this.lastChunkAt,
-      level: this.level,
-      pendingRequests: [...this.pendingRequests.values()].map(({ ws: _ws, timeout: _t, ...rest }) => rest),
-      approvedDevices: store.list(),
+      level: this.level
     };
   }
 
   // ─── Connection handling ────────────────────────────────────────────────────
 
-  private handleNewConnection(ws: any, req: any): void {
-    const host = req.headers.host || '127.0.0.1';
-    const url = new URL(req.url || '/', `https://${host}`);
-    const deviceId = url.searchParams.get('deviceId') || '';
-    const deviceName = url.searchParams.get('deviceName') || 'Celular';
-    const userAgent = (req.headers['user-agent'] || '').slice(0, 300);
-
-    if (!deviceId) {
-      ws.close(1008, 'missing deviceId');
+  private handleNewConnection(ws: any, _req: any): void {
+    if (this.clients.size >= 1) {
+      logger.info('PhoneMicServer: connection rejected, only 1 client allowed');
+      try { ws.close(1008, 'Server is full'); } catch { /* ignore */ }
       return;
     }
 
-    const store = getPhoneMicDeviceStore();
-
-    if (store.isApproved(deviceId)) {
-      // Device already approved → connect immediately
-      store.updateLastSeen(deviceId);
-      ws._phoneMicDeviceId = deviceId;
-      try { ws.send(JSON.stringify({ type: 'approved' })); } catch { /* ignore */ }
-      this.setupApprovedClient(ws);
-      logger.info({ deviceId, deviceName }, 'PhoneMicServer: known device connected');
-      this.emitStatus();
-      return;
-    }
-
-    // New device → pending approval
-    const requestId = randomUUID();
-    const pendingReq: PendingApprovalRequest = {
-      requestId,
-      deviceId,
-      deviceName,
-      userAgent,
-      requestedAt: Date.now(),
-    };
-
-    const timeout = setTimeout(() => {
-      this.pendingRequests.delete(requestId);
-      try { ws.close(1008, 'approval timeout'); } catch { /* ignore */ }
-      logger.info({ requestId, deviceId }, 'PhoneMicServer: approval request timed out');
-      this.emitStatus();
-    }, APPROVAL_TIMEOUT_MS);
-
-    this.pendingRequests.set(requestId, { ...pendingReq, ws, timeout });
-
-    // Tell phone to show "waiting for approval" state
-    try { ws.send(JSON.stringify({ type: 'pending', requestId })); } catch { /* ignore */ }
-
-    // Notify desktop UI of incoming approval request
-    this.emit('approvalRequest', pendingReq);
+    try { ws.send(JSON.stringify({ type: 'approved' })); } catch { /* ignore */ }
+    this.setupApprovedClient(ws);
+    logger.info('PhoneMicServer: client connected automatically');
     this.emitStatus();
-
-    logger.info({ requestId, deviceId, deviceName }, 'PhoneMicServer: new device approval request');
-
-    ws.on('close', () => {
-      // If disconnects before approval, clean up
-      if (this.pendingRequests.has(requestId)) {
-        clearTimeout(this.pendingRequests.get(requestId)!.timeout);
-        this.pendingRequests.delete(requestId);
-        this.emitStatus();
-      }
-    });
   }
 
   private setupApprovedClient(ws: any): void {
@@ -315,7 +191,7 @@ export class PhoneMicServer extends EventEmitter {
     ws.on('close', () => {
       this.clients.delete(ws);
       this.emitStatus();
-      logger.info({ deviceId: ws._phoneMicDeviceId }, 'PhoneMicServer: client disconnected');
+      logger.info('PhoneMicServer: client disconnected');
     });
 
     ws.on('error', (err: Error) => logger.warn({ err }, 'PhoneMicServer: WS error'));

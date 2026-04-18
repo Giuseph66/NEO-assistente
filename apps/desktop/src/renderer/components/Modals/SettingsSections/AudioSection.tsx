@@ -56,7 +56,6 @@ export const AudioSection: React.FC<AudioSectionProps> = ({
     const [phoneMicLevel, setPhoneMicLevel] = useState(0);
     const [phoneMicIsDefault, setPhoneMicIsDefault] = useState(false);
     const [phoneMicTest, setPhoneMicTest] = useState<AudioTestState>({ status: 'idle', url: null, message: null });
-    const [approvalRequest, setApprovalRequest] = useState<PendingApprovalRequest | null>(null);
     const [virtualDeviceStatus, setVirtualDeviceStatus] = useState<VirtualDeviceStatus | null>(null);
     const [virtualDeviceAvailable, setVirtualDeviceAvailable] = useState(false);
     const [micTestElapsedMs, setMicTestElapsedMs] = useState(0);
@@ -287,22 +286,14 @@ export const AudioSection: React.FC<AudioSectionProps> = ({
         const offStatus = window.phoneMic.onStatus((status) => {
             setPhoneMicStatus(status);
             setPhoneMicLevel(status.level || 0);
-            // Sync approval request from status (in case reconnection)
-            if (status.pendingRequests?.length > 0) {
-                setApprovalRequest(status.pendingRequests[0]);
-            } else {
-                setApprovalRequest(null);
-            }
         });
         const offLevel = window.phoneMic.onLevel((payload) => setPhoneMicLevel(payload.level));
         const offIsDefault = window.phoneMic.onIsDefault?.((val) => setPhoneMicIsDefault(val));
-        const offApproval = window.phoneMic.onApprovalRequest?.((req) => setApprovalRequest(req));
         const offVirtual = window.phoneMic.onVirtualDeviceStatus?.((status) => setVirtualDeviceStatus(status));
         return () => {
             offStatus();
             offLevel();
             offIsDefault?.();
-            offApproval?.();
             offVirtual?.();
         };
     }, []);
@@ -428,26 +419,6 @@ export const AudioSection: React.FC<AudioSectionProps> = ({
         }
     };
 
-    const handleApprove = async () => {
-        if (!approvalRequest) return;
-        await window.phoneMic?.approveRequest(approvalRequest.requestId);
-        setApprovalRequest(null);
-        showToast(`${approvalRequest.deviceName} aprovado!`);
-    };
-
-    const toggleVirtualDevice = async () => {
-        if (!window.phoneMic) return;
-        try {
-            if (virtualDeviceStatus?.active) {
-                await window.phoneMic.disableVirtualDevice();
-            } else {
-                await window.phoneMic.enableVirtualDevice();
-            }
-        } catch (error) {
-            setPhoneMicError(error instanceof Error ? error.message : 'Falha ao alternar microfone virtual');
-        }
-    };
-
     const toggleVirtualDeviceDefault = async () => {
         if (!window.phoneMic || !virtualDeviceStatus?.active) return;
         try {
@@ -455,19 +426,6 @@ export const AudioSection: React.FC<AudioSectionProps> = ({
         } catch (error) {
             setPhoneMicError(error instanceof Error ? error.message : 'Falha ao definir como padrão do sistema');
         }
-    };
-
-    const handleDeny = async () => {
-        if (!approvalRequest) return;
-        await window.phoneMic?.denyRequest(approvalRequest.requestId);
-        setApprovalRequest(null);
-        showToast('Acesso negado.');
-    };
-
-    const handleRevokeDevice = async (deviceId: string, deviceName: string) => {
-        await window.phoneMic?.revokeDevice(deviceId);
-        showToast(`${deviceName} removido.`);
-        window.phoneMic?.getStatus().then(setPhoneMicStatus).catch(() => undefined);
     };
 
     const handlePhoneMicTest = async () => {
@@ -752,8 +710,13 @@ export const AudioSection: React.FC<AudioSectionProps> = ({
                         </div>
                     </div>
                     <div className="phone-mic-grid">
-                        <div className="phone-mic-qr" title="Clique para ampliar" onClick={() => phoneMicQr && setPhoneMicQrExpanded(true)} style={{ cursor: phoneMicQr ? 'zoom-in' : 'default' }}>
-                            {phoneMicQr ? (
+                        <div className="phone-mic-qr" title="Clique para ampliar" onClick={() => phoneMicQr && !(phoneMicStatus?.clients > 0) && setPhoneMicQrExpanded(true)} style={{ cursor: phoneMicQr && !(phoneMicStatus?.clients > 0) ? 'zoom-in' : 'default' }}>
+                            {phoneMicStatus?.clients > 0 ? (
+                                <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', color: 'var(--success)'}}>
+                                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                                    <span style={{fontSize: 11, fontWeight: 700, letterSpacing: '0.05em'}}>CONECTADO</span>
+                                </div>
+                            ) : phoneMicQr ? (
                                 <img src={phoneMicQr} alt="QR Code do microfone do celular" />
                             ) : (
                                 <span>QR</span>
@@ -783,69 +746,6 @@ export const AudioSection: React.FC<AudioSectionProps> = ({
                             </div>
                         </div>
                     </div>
-
-                    {/* ── Approval request banner ─────────────────────────── */}
-                    {approvalRequest && (
-                        <div style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: 10, padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
-                                <span style={{ fontSize: 12.5, fontWeight: 600, color: '#f59e0b' }}>Solicitação de acesso</span>
-                            </div>
-                            <span style={{ fontSize: 12, color: 'rgba(226,232,240,0.8)' }}>
-                                <strong style={{ color: '#e2e8f0' }}>{approvalRequest.deviceName}</strong> quer usar o microfone do celular.
-                            </span>
-                            <div style={{ display: 'flex', gap: 8 }}>
-                                <button
-                                    type="button"
-                                    className="secondary-button"
-                                    onClick={handleApprove}
-                                    style={{ flex: 1, background: 'rgba(16,185,129,0.15)', borderColor: 'rgba(16,185,129,0.4)', color: '#10b981', fontWeight: 600 }}
-                                >
-                                    ✓ Permitir
-                                </button>
-                                <button
-                                    type="button"
-                                    className="secondary-button"
-                                    onClick={handleDeny}
-                                    style={{ flex: 1, background: 'rgba(239,68,68,0.1)', borderColor: 'rgba(239,68,68,0.3)', color: '#ef4444', fontWeight: 600 }}
-                                >
-                                    ✗ Negar
-                                </button>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* ── Approved devices list ───────────────────────────── */}
-                    {((phoneMicStatus?.approvedDevices?.length ?? 0) > 0) && (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                            <span style={{ fontSize: 11, color: 'var(--text-muted, #64748b)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                                Dispositivos Autorizados
-                            </span>
-                            {phoneMicStatus!.approvedDevices.map((device) => (
-                                <div key={device.deviceId} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', background: 'rgba(255,255,255,0.04)', borderRadius: 8, border: '1px solid rgba(255,255,255,0.07)' }}>
-                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ color: '#64748b', flexShrink: 0 }}>
-                                        <rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>
-                                    </svg>
-                                    <div style={{ flex: 1, minWidth: 0 }}>
-                                        <div style={{ fontSize: 12.5, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{device.deviceName}</div>
-                                        <div style={{ fontSize: 10.5, color: '#64748b' }}>
-                                            {device.lastSeenAt ? `Visto: ${new Date(device.lastSeenAt).toLocaleDateString('pt-BR')}` : 'Nunca conectado'}
-                                        </div>
-                                    </div>
-                                    <button
-                                        type="button"
-                                        title="Revogar acesso"
-                                        onClick={() => handleRevokeDevice(device.deviceId, device.deviceName)}
-                                        style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: '#ef4444', padding: 4 }}
-                                    >
-                                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                                            <path d="M18 6L6 18M6 6l12 12"/>
-                                        </svg>
-                                    </button>
-                                </div>
-                            ))}
-                        </div>
-                    )}
 
                     <div className="visualizer-container-settings">
                         <AudioVisualizer analyser={null} level={phoneMicLevel} width={220} height={60} />

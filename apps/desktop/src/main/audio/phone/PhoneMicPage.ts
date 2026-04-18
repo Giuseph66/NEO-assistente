@@ -1,7 +1,6 @@
 /**
  * renderPhoneMicPage() — Single-file HTML served by the PhoneMicServer.
- * No token needed. Device identifies itself via a stable deviceId stored in localStorage.
- * Connection flow: pending_approval → approved → recording
+ * Connects immediately. Only allows 1 concurrent connection to the Desktop.
  */
 export function renderPhoneMicPage(): string {
   return /* html */ `<!DOCTYPE html>
@@ -57,22 +56,12 @@ export function renderPhoneMicPage(): string {
   .btn-ghost { background: rgba(255,255,255,0.06); color: var(--text); border: 1px solid var(--border); }
   .btn:disabled { opacity: 0.45; cursor: default; }
 
-  /* ── Input ── */
-  .input-wrap { display: flex; flex-direction: column; gap: 6px; width: 100%; }
-  .input-wrap label { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
-  .ipt { background: rgba(255,255,255,0.05); border: 1px solid var(--border); border-radius: 10px; padding: 13px 14px; color: var(--text); font-size: 15px; width: 100%; }
-  .ipt:focus { outline: none; border-color: var(--accent2); }
-
   /* ── Status indicator ── */
   .status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
   .status-dot.green { background: var(--success); box-shadow: 0 0 8px var(--success); }
   .status-dot.amber { background: var(--warn); box-shadow: 0 0 8px var(--warn); animation: pulse 1.2s ease-in-out infinite; }
   .status-dot.red { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
-
-  /* ── Pending / waiting ── */
-  .spinner { width: 52px; height: 52px; border: 3px solid rgba(167,139,250,0.15); border-top-color: var(--accent2); border-radius: 50%; animation: spin 0.9s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
 
   /* ── Mic button ── */
   .mic-wrap { position: relative; width: 120px; height: 120px; display: flex; align-items: center; justify-content: center; }
@@ -95,12 +84,9 @@ export function renderPhoneMicPage(): string {
   .row { display: flex; align-items: center; gap: 10px; }
   p.muted { color: var(--muted); font-size: 13px; text-align: center; line-height: 1.5; }
   h2 { font-size: 18px; font-weight: 700; }
-  h3 { font-size: 15px; font-weight: 600; color: var(--muted); }
 
   /* ── Denied ── */
   .denied-icon { width: 56px; height: 56px; border-radius: 50%; background: rgba(239,68,68,0.12); display: flex; align-items: center; justify-content: center; border: 1px solid rgba(239,68,68,0.3); }
-  .info-box { background: rgba(167,139,250,.08); border: 1px solid rgba(167,139,250,.2); border-radius: 12px; padding: 14px 16px; font-size: 12.5px; color: var(--muted); line-height: 1.6; }
-  .info-box a { color: var(--accent2); text-decoration: none; }
 
   /* mobile safe areas */
   .safe-bottom { height: env(safe-area-inset-bottom, 0px); }
@@ -108,39 +94,15 @@ export function renderPhoneMicPage(): string {
 </head>
 <body>
 
-<!-- ══ SCREEN: setup — name your device ══════════════════════════════════════ -->
-<div class="screen active" id="scr-setup">
+<!-- ══ SCREEN: connect — landing ══════════════════════════════════════ -->
+<div class="screen active" id="scr-connect">
   <div class="logo"><div class="logo-dot"></div>NEO Mic</div>
-  <div class="card" style="gap:20px;display:flex;flex-direction:column">
-    <div>
-      <h2 style="margin-bottom:6px">Configurar Dispositivo</h2>
-      <p class="muted">Dê um nome para identificar este celular no computador.</p>
+  <div class="card" style="gap:20px;display:flex;flex-direction:column;align-items:center;">
+    <div style="text-align: center;">
+      <h2 style="margin-bottom:6px">Conectar ao Desktop</h2>
+      <p class="muted">Toque no botão abaixo para usar este celular como microfone.</p>
     </div>
-    <div class="input-wrap">
-      <label>Nome do dispositivo</label>
-      <input class="ipt" id="inp-name" type="text" placeholder="Meu iPhone" maxlength="40" />
-    </div>
-    <button class="btn btn-primary" id="btn-connect">Conectar</button>
-  </div>
-  <div class="info-box">
-    <strong style="color:var(--accent2)">Certificado self-signed:</strong> se aparecer aviso de segurança no navegador,
-    toque em <em>Avançado → Continuar para o site</em> e recarregue.
-  </div>
-</div>
-
-<!-- ══ SCREEN: pending — waiting for desktop approval ════════════════════════ -->
-<div class="screen" id="scr-pending">
-  <div class="logo"><div class="logo-dot"></div>NEO Mic</div>
-  <div class="card" style="gap:20px;display:flex;flex-direction:column;align-items:center;text-align:center">
-    <div class="spinner"></div>
-    <div>
-      <h2 style="margin-bottom:8px">Aguardando aprovação</h2>
-      <p class="muted">Uma solicitação foi enviada ao computador.<br>Clique em <strong>Permitir</strong> lá para continuar.</p>
-    </div>
-    <div class="row">
-      <div class="status-dot amber"></div>
-      <span style="font-size:13px;color:var(--muted)" id="pending-name"></span>
-    </div>
+    <button class="btn btn-primary" id="btn-connect">Conectar Microfone</button>
   </div>
 </div>
 
@@ -154,8 +116,8 @@ export function renderPhoneMicPage(): string {
       </svg>
     </div>
     <div>
-      <h2 style="margin-bottom:6px">Acesso negado</h2>
-      <p class="muted" id="denied-msg">O computador não aprovou esta conexão.</p>
+      <h2 style="margin-bottom:6px">Acesso Bloqueado</h2>
+      <p class="muted" id="denied-msg">O Desktop já está com um microfone conectado.</p>
     </div>
     <button class="btn btn-ghost" id="btn-restart">Tentar novamente</button>
   </div>
@@ -167,7 +129,7 @@ export function renderPhoneMicPage(): string {
 
   <div class="row" style="gap:8px">
     <div class="status-dot green"></div>
-    <span style="font-size:13px;color:var(--muted)" id="rec-device-name"></span>
+    <span style="font-size:13px;color:var(--muted)" id="rec-device-name">Celular Conectado</span>
   </div>
 
   <div class="mic-wrap" id="mic-wrap">
@@ -203,46 +165,12 @@ export function renderPhoneMicPage(): string {
 /* ─── Globals & Identity ────────────────────────────────────────────────── */
 let ws = null, audioCtx = null, workletNode = null, stream = null;
 let muted = false, timerInterval = null, startAt = 0;
-let deviceName = '';
-
-function getDeviceId() {
-  let id = localStorage.getItem('neo-mic-device-id');
-  if (!id) {
-    id = ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
-      (c ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4)))).toString(16));
-    localStorage.setItem('neo-mic-device-id', id);
-  }
-  return id;
-}
-
-function getDeviceName() {
-  return localStorage.getItem('neo-mic-device-name') || '';
-}
-
-function guessDeviceName() {
-  const ua = navigator.userAgent;
-  let name = 'Celular';
-  if (/iPhone/.test(ua)) name = 'iPhone';
-  else if (/iPad/.test(ua)) name = 'iPad';
-  else if (/Android/.test(ua)) name = 'Android';
-  if (/Chrome\\//.test(ua) && !/Chromium/.test(ua)) name += ' (Chrome)';
-  else if (/Firefox\\//.test(ua)) name += ' (Firefox)';
-  else if (/Safari\\//.test(ua) && !/Chrome/.test(ua)) name += ' (Safari)';
-  return name;
-}
 
 /* ─── UI Actions ─────────────────────────────────────────────────────────── */
-function goConnect() {
-  var inp = document.getElementById('inp-name');
-  deviceName = (inp.value.trim()) || guessDeviceName();
-  localStorage.setItem('neo-mic-device-name', deviceName);
-  connect();
-}
-
 function doRestart() {
   if (ws) { ws.close(); ws = null; }
   stopRecording();
-  show('scr-setup');
+  show('scr-connect');
 }
 
 function doToggleMute() {
@@ -271,13 +199,7 @@ function show(id) {
 /* ─── WebSocket connection ──────────────────────────────────────────────── */
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const deviceId = getDeviceId();
-  const url = proto + '://' + location.host + '/phone-mic/ws'
-    + '?deviceId=' + encodeURIComponent(deviceId)
-    + '&deviceName=' + encodeURIComponent(deviceName);
-
-  show('scr-pending');
-  document.getElementById('pending-name').textContent = deviceName;
+  const url = proto + '://' + location.host + '/phone-mic/ws';
 
   if (ws) { try { ws.close(); } catch {} }
   ws = new WebSocket(url);
@@ -288,11 +210,6 @@ function connect() {
       try {
         const msg = JSON.parse(e.data);
         if (msg.type === 'approved') onApproved();
-        else if (msg.type === 'pending') { /* waiting */ }
-        else if (msg.type === 'denied') {
-          document.getElementById('denied-msg').textContent = msg.message || 'O computador não aprovou esta conexão.';
-          show('scr-denied');
-        }
       } catch {}
     }
   });
@@ -300,9 +217,10 @@ function connect() {
   ws.addEventListener('close', e => {
     stopRecording();
     if (e.code === 1008) {
-      document.getElementById('denied-msg').textContent =
-        e.reason === 'approval timeout' ? 'Tempo de aprovação esgotado.' :
-        e.reason === 'access revoked' ? 'Acesso revogado.' : 'Acesso negado.';
+      document.getElementById('denied-msg').textContent = 'O Desktop já possui um microfone ativo.';
+      show('scr-denied');
+    } else {
+      document.getElementById('denied-msg').textContent = 'Conexão encerrada.';
       show('scr-denied');
     }
   });
@@ -316,7 +234,6 @@ function connect() {
 
 /* ─── Audio Handling ────────────────────────────────────────────────────── */
 async function onApproved() {
-  document.getElementById('rec-device-name').textContent = deviceName;
   show('scr-record');
 
   try {
@@ -332,7 +249,6 @@ async function onApproved() {
   audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
   const source = audioCtx.createMediaStreamSource(stream);
 
-  // Use single quotes and simple strings to avoid backtick nesting issues in template strings
   const workletCode = 'class PCMProcessor extends AudioWorkletProcessor {' +
     'process(inputs) {' +
       'const ch = inputs[0] ? inputs[0][0] : null;' +
@@ -414,22 +330,14 @@ function startViz(source) {
   draw();
 }
 
-/* ─── Initialization — wire all event listeners here ───────────────────── */
+/* ─── Initialization ───────────────────────────────────────────────────── */
 document.addEventListener('DOMContentLoaded', function() {
-  // Setup screen
-  var inp = document.getElementById('inp-name');
   var btnConnect = document.getElementById('btn-connect');
-  if (inp) {
-    inp.value = getDeviceName() || guessDeviceName();
-    inp.addEventListener('keydown', function(e) { if (e.key === 'Enter') goConnect(); });
-  }
-  if (btnConnect) btnConnect.addEventListener('click', goConnect);
+  if (btnConnect) btnConnect.addEventListener('click', connect);
 
-  // Denied screen
   var btnRestart = document.getElementById('btn-restart');
   if (btnRestart) btnRestart.addEventListener('click', doRestart);
 
-  // Recording screen
   var micBtn = document.getElementById('mic-btn');
   if (micBtn) micBtn.addEventListener('click', doToggleMute);
 });
