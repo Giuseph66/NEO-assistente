@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { spawn, spawnSync, ChildProcessWithoutNullStreams } from 'child_process';
+import { spawn, spawnSync, ChildProcess } from 'child_process';
 import { getLogger } from '@neo/logger';
 
 const logger = getLogger();
@@ -17,7 +17,7 @@ const commandExists = (cmd: string): boolean => {
 };
 
 export class SystemAudioCapture {
-  private process: ChildProcessWithoutNullStreams | null = null;
+  private process: ChildProcess | null = null;
   private emitter = new EventEmitter();
   private backend: CaptureBackend | null = null;
   private sourceId: string | null = null;
@@ -38,15 +38,21 @@ export class SystemAudioCapture {
     const args = this.buildArgs(backend, options);
     logger.info({ backend, args }, 'Starting system audio capture');
 
-    this.process = spawn(backend, args, {
+    const child = spawn(backend, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    this.process.stdout.on('data', (chunk) => {
+    if (!child.stdout || !child.stderr) {
+      throw new Error('Falha ao abrir stream de audio do sistema');
+    }
+
+    this.process = child;
+
+    child.stdout.on('data', (chunk) => {
       this.emitter.emit('data', chunk);
     });
 
-    this.process.stderr.on('data', (chunk) => {
+    child.stderr.on('data', (chunk) => {
       const message = chunk.toString().trim();
       if (this.stopping && message.includes('read error')) return;
       if (message) {
@@ -54,11 +60,11 @@ export class SystemAudioCapture {
       }
     });
 
-    this.process.on('error', (error) => {
+    child.on('error', (error) => {
       this.emitter.emit('error', error);
     });
 
-    this.process.on('close', (code) => {
+    child.on('close', (code) => {
       if (this.stopping) {
         this.process = null;
         this.backend = null;
@@ -79,8 +85,8 @@ export class SystemAudioCapture {
     this.process = null;
     this.backend = null;
 
-    proc.stdout.removeAllListeners();
-    proc.stderr.removeAllListeners();
+    proc.stdout?.removeAllListeners();
+    proc.stderr?.removeAllListeners();
 
     proc.kill('SIGINT');
     setTimeout(() => {
@@ -120,6 +126,7 @@ export class SystemAudioCapture {
     if (backend === 'parec') {
       return [
         `--device=${options.sourceId}`,
+        '--raw',
         '--format=s16le',
         `--rate=${sampleRate}`,
         '--channels=1',
@@ -131,11 +138,12 @@ export class SystemAudioCapture {
         '--target',
         options.sourceId,
         '--format',
-        's16le',
+        's16',
         '--rate',
         sampleRate,
         '--channels',
         '1',
+        '-',
       ];
     }
 
@@ -143,7 +151,7 @@ export class SystemAudioCapture {
       '--target',
       options.sourceId,
       '--format',
-      's16le',
+      's16',
       '--rate',
       sampleRate,
       '--channels',

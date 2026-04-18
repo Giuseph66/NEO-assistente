@@ -452,6 +452,63 @@ const authApi = {
     },
 }
 
+const storageApi = {
+    getStats: () => ipcRenderer.invoke('storage:getStats'),
+    openFolder: (type: string) => ipcRenderer.invoke('storage:openFolder', type),
+    clearCache: () => ipcRenderer.invoke('storage:clearCache'),
+    deleteFolderContents: (type: string) => ipcRenderer.invoke('storage:deleteFolderContents', type),
+    listFiles: (type: string) => ipcRenderer.invoke('storage:listFiles', type),
+    deleteFile: (filePath: string) => ipcRenderer.invoke('storage:deleteFile', filePath),
+}
+
+const phoneMicApi = {
+    start: (port?: number) => ipcRenderer.invoke('phoneMic.start', port),
+    stop: () => ipcRenderer.invoke('phoneMic.stop'),
+    getStatus: () => ipcRenderer.invoke('phoneMic.getStatus'),
+    testRecord: (durationMs?: number) => ipcRenderer.invoke('phoneMic.testRecord', durationMs ?? 5000),
+    approveRequest: (requestId: string) => ipcRenderer.invoke('phoneMic.approveRequest', requestId),
+    denyRequest: (requestId: string) => ipcRenderer.invoke('phoneMic.denyRequest', requestId),
+    revokeDevice: (deviceId: string) => ipcRenderer.invoke('phoneMic.revokeDevice', deviceId),
+    listDevices: () => ipcRenderer.invoke('phoneMic.listDevices'),
+    // ─── Virtual system microphone ──────────────────────────────────────────
+    enableVirtualDevice: () => ipcRenderer.invoke('phoneMic.enableVirtualDevice'),
+    disableVirtualDevice: () => ipcRenderer.invoke('phoneMic.disableVirtualDevice'),
+    setVirtualDeviceAsDefault: (enable: boolean) => ipcRenderer.invoke('phoneMic.setVirtualDeviceAsDefault', enable),
+    getVirtualDeviceStatus: () => ipcRenderer.invoke('phoneMic.getVirtualDeviceStatus'),
+    checkVirtualDeviceAvailability: () => ipcRenderer.invoke('phoneMic.checkVirtualDeviceAvailability'),
+    // ─── Event listeners ────────────────────────────────────────────────────
+    onStatus: (cb: (event: any) => void) => {
+        const listener = (_event: any, payload: any) => cb(payload)
+        ipcRenderer.on('phoneMic.status', listener)
+        return () => ipcRenderer.removeListener('phoneMic.status', listener)
+    },
+    onLevel: (cb: (event: any) => void) => {
+        const listener = (_event: any, payload: any) => cb(payload)
+        ipcRenderer.on('phoneMic.level', listener)
+        return () => ipcRenderer.removeListener('phoneMic.level', listener)
+    },
+    onAudio: (cb: (event: any) => void) => {
+        const listener = (_event: any, payload: any) => cb(payload)
+        ipcRenderer.on('phoneMic.audio', listener)
+        return () => ipcRenderer.removeListener('phoneMic.audio', listener)
+    },
+    onIsDefault: (cb: (isDefault: boolean) => void) => {
+        const listener = (_event: any, payload: boolean) => cb(payload)
+        ipcRenderer.on('phoneMic.isDefault', listener)
+        return () => ipcRenderer.removeListener('phoneMic.isDefault', listener)
+    },
+    onApprovalRequest: (cb: (request: any) => void) => {
+        const listener = (_event: any, payload: any) => cb(payload)
+        ipcRenderer.on('phoneMic.approvalRequest', listener)
+        return () => ipcRenderer.removeListener('phoneMic.approvalRequest', listener)
+    },
+    onVirtualDeviceStatus: (cb: (status: any) => void) => {
+        const listener = (_event: any, payload: any) => cb(payload)
+        ipcRenderer.on('phoneMic.virtualDeviceStatus', listener)
+        return () => ipcRenderer.removeListener('phoneMic.virtualDeviceStatus', listener)
+    },
+}
+
 // Use `contextBridge` APIs to expose Electron APIs to
 // renderer only if context isolation is enabled, otherwise
 // just add to the DOM global.
@@ -473,6 +530,8 @@ if (process.contextIsolated) {
         contextBridge.exposeInMainWorld('notifications', notificationsApi)
         contextBridge.exposeInMainWorld('automation', automationApi)
         contextBridge.exposeInMainWorld('auth', authApi)
+        contextBridge.exposeInMainWorld('storage', storageApi)
+        contextBridge.exposeInMainWorld('phoneMic', phoneMicApi)
     } catch (error) {
         console.error(error)
     }
@@ -509,4 +568,8 @@ if (process.contextIsolated) {
     window.automation = automationApi
     // @ts-ignore (define in dts)
     window.auth = authApi
+    // @ts-ignore (define in dts)
+    window.storage = storageApi
+    // @ts-ignore (define in dts)
+    window.phoneMic = phoneMicApi
 }

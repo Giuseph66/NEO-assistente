@@ -370,7 +370,8 @@ export function TranscriptionPanel(): JSX.Element {
       });
       setRecorderStatus(result);
     } catch (error) {
-      setSystemError('Falha ao iniciar gravacao do sistema');
+      const message = error instanceof Error ? error.message : 'Falha ao iniciar gravacao do sistema';
+      setSystemError(message);
     }
   };
 
@@ -403,7 +404,8 @@ export function TranscriptionPanel(): JSX.Element {
     try {
       await window.systemStt.start({ sourceId: resolvedSourceId });
     } catch (error) {
-      setSystemError('Falha ao iniciar STT do sistema');
+      const message = error instanceof Error ? error.message : 'Falha ao iniciar STT do sistema';
+      setSystemError(message);
     }
   };
 

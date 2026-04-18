@@ -36,6 +36,8 @@ import { registerSessionIpc } from './ipc/sessionIpc'
 import { registerAutomationIpc } from './ipc/automationIpc'
 import { registerAutomationFlowIpc } from './ipc/automationFlowIpc'
 import { registerAuthIpc } from './ipc/authIpc'
+import { registerStorageIpc } from './ipc/storageIpc'
+import { registerPhoneMicIpc } from './ipc/phoneMicIpc'
 import { NotificationStore } from './notifications/notification-store'
 import { NotificationCenter } from './notifications/notification-center'
 import { registerNotificationsIpc } from './notifications/notifications-ipc'
@@ -45,6 +47,7 @@ import { RecorderService } from './audio/recording/RecorderService'
 import { SystemSttController } from './stt/SystemSttController'
 import { ScreenTranslateService } from './services/translation/ScreenTranslateService'
 import { SystemAudioPreviewService } from './audio/system/SystemAudioPreviewService'
+import { getPhoneMicServer } from './audio/phone/PhoneMicServer'
 import { setSharedSttText, getSharedSttText, clearSharedSttText } from './storage/sharedInputStore'
 
 function createWindow(): void {
@@ -584,6 +587,12 @@ app.whenReady().then(async () => {
 
     // Initialize Auth IPC (OAuth PKCE)
     registerAuthIpc();
+
+    // Initialize Storage IPC
+    registerStorageIpc();
+
+    // Initialize Phone Mic server IPC
+    registerPhoneMicIpc(getPhoneMicServer());
 
     // Initialize Notifications IPC
     if (notificationStore && notificationCenter) {

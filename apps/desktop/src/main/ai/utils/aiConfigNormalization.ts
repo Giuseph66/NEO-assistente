@@ -4,7 +4,7 @@ import { getModelsForProvider } from '../modelCatalog';
 const FALLBACK_DEFAULT_MODEL: Partial<Record<AIProviderId, string>> = {
   gemini: 'gemini-2.5-flash',
   openai: 'gpt-4o',
-  'openai-codex': 'gpt-5',
+  'openai-codex': 'GPT-5.3-Codex',
 };
 
 function getKnownModelIds(providerId: AIProviderId): string[] {

@@ -78,6 +78,43 @@ type AppNotificationSettings = {
   };
 };
 
+type ApprovedDevice = {
+  deviceId: string;
+  deviceName: string;
+  userAgent: string;
+  approvedAt: number;
+  lastSeenAt: number;
+};
+
+type PendingApprovalRequest = {
+  requestId: string;
+  deviceId: string;
+  deviceName: string;
+  userAgent: string;
+  requestedAt: number;
+};
+
+type PhoneMicStatus = {
+  running: boolean;
+  port: number;
+  localUrl: string | null;
+  clients: number;
+  bytesReceived: number;
+  chunksReceived: number;
+  lastChunkAt: number | null;
+  level: number;
+  pendingRequests: PendingApprovalRequest[];
+  approvedDevices: ApprovedDevice[];
+};
+
+type VirtualDeviceStatus = {
+  active: boolean;
+  sinkName: string;
+  sourceName: string;
+  isSystemDefault: boolean;
+  error: string | null;
+};
+
 declare global {
   interface Window {
     stt: {
@@ -109,6 +146,28 @@ declare global {
     systemAudio: {
       listSources: () => Promise<SystemAudioSourceInfo[]>;
       detectDefaultMonitor: () => Promise<string | null>;
+    };
+    phoneMic: {
+      start: (port?: number) => Promise<PhoneMicStatus>;
+      stop: () => Promise<PhoneMicStatus>;
+      getStatus: () => Promise<PhoneMicStatus>;
+      testRecord: (durationMs?: number) => Promise<{ base64: string; mimeType: string } | null>;
+      approveRequest: (requestId: string) => Promise<void>;
+      denyRequest: (requestId: string) => Promise<void>;
+      revokeDevice: (deviceId: string) => Promise<boolean>;
+      listDevices: () => Promise<ApprovedDevice[]>;
+      // virtual system mic
+      enableVirtualDevice: () => Promise<VirtualDeviceStatus>;
+      disableVirtualDevice: () => Promise<VirtualDeviceStatus>;
+      setVirtualDeviceAsDefault: (enable: boolean) => Promise<VirtualDeviceStatus>;
+      getVirtualDeviceStatus: () => Promise<VirtualDeviceStatus>;
+      checkVirtualDeviceAvailability: () => Promise<{ ok: boolean; missing: string[] }>;
+      onStatus: (cb: (event: PhoneMicStatus) => void) => () => void;
+      onLevel: (cb: (event: { level: number; rms: number; ts: number }) => void) => () => void;
+      onAudio: (cb: (event: { bytes: number; ts: number }) => void) => () => void;
+      onIsDefault?: (cb: (isDefault: boolean) => void) => () => void;
+      onApprovalRequest?: (cb: (request: PendingApprovalRequest) => void) => () => void;
+      onVirtualDeviceStatus?: (cb: (status: VirtualDeviceStatus) => void) => () => void;
     };
     recorder: {
       start: (options: RecorderStartOptions) => Promise<RecorderStatus>;

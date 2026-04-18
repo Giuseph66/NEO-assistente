@@ -25,8 +25,8 @@ export class OpenAIProvider extends BaseVisionProvider {
     const fallback: ModelInfo[] = this.transport === 'codex'
       ? [
         {
-          id: 'gpt-5',
-          name: 'GPT-5',
+          id: 'GPT-5.3-Codex',
+          name: 'GPT-5.3-Codex',
           provider: this.id,
           supportsVision: true,
           maxTokens: 8192,
@@ -328,17 +328,7 @@ export class OpenAIProvider extends BaseVisionProvider {
 
   private resolveCodexModel(modelName?: string): string {
     const candidate = (modelName || '').trim();
-    if (!candidate) return 'gpt-5';
-    const normalized = candidate.toLowerCase();
-    // Modelos legacy do endpoint /v1 costumam falhar no backend Codex com conta ChatGPT.
-    if (
-      normalized === 'gpt-4o' ||
-      normalized === 'gpt-4.1' ||
-      normalized === 'o1' ||
-      normalized === 'o3'
-    ) {
-      return 'gpt-5';
-    }
+    if (!candidate) return 'GPT-5.3-Codex';
     return candidate;
   }
 
@@ -669,14 +659,14 @@ export class OpenAIProvider extends BaseVisionProvider {
             if (
               !didModelFallback &&
               this.isCodexUnsupportedModelError(errorInfo.status, errorInfo.message, errorInfo.type) &&
-              modelToUse !== 'gpt-5'
+              modelToUse !== 'GPT-5.3-Codex'
             ) {
               didModelFallback = true;
               shouldRetryWithFallbackModel = true;
-              modelToUse = 'gpt-5';
+              modelToUse = 'GPT-5.3-Codex';
               logger.warn(
                 { requestedModel, fallbackModel: modelToUse, mode, status: errorInfo.status, errorType: errorInfo.type },
-                'Codex backend rejected selected model, retrying with gpt-5'
+                'Codex backend rejected selected model, retrying with GPT-5.3-Codex'
               );
               break;
             }

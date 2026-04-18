@@ -53,13 +53,15 @@ export const ApiSection: React.FC<ApiSectionProps> = ({
     ): string => {
         if (provider === 'openai') {
             const map: Record<string, string> = {
-                'GPT-5.2 Standard': 'gpt-5',
-                'GPT-5.2 Mini': 'gpt-5-mini',
-                'GPT-4.1 Standard': 'gpt-4.1',
-                'GPT-4o': 'gpt-4o',
-                'o1': 'o1',
+                'GPT-5.4': 'GPT-5.4',
+                'GPT-5.4-Mini': 'GPT-5.4-Mini',
+                'GPT-5.3-Codex': 'GPT-5.3-Codex',
+                'GPT-5.2': 'GPT-5.2',
+                'GPT-5.2-Codex': 'GPT-5.2-Codex',
+                'GPT-5.1-Codex-Max': 'GPT-5.1-Codex-Max',
+                'GPT-5.1-Codex-Mini': 'GPT-5.1-Codex-Mini',
             };
-            return map[value] || value || 'gpt-5';
+            return map[value] || value || 'GPT-5.3-Codex';
         }
         if (provider === 'google') {
             const map: Record<string, string> = {
@@ -117,6 +119,43 @@ export const ApiSection: React.FC<ApiSectionProps> = ({
         window.addEventListener('storage', handleStorageChange);
         return () => window.removeEventListener('storage', handleStorageChange);
     }, []);
+
+    const [fetchedOpenAIModels, setFetchedOpenAIModels] = React.useState<string[]>([
+        'GPT-5.4',
+        'GPT-5.4-Mini',
+        'GPT-5.3-Codex',
+        'GPT-5.2',
+        'GPT-5.2-Codex',
+        'GPT-5.1-Codex-Max',
+        'GPT-5.1-Codex-Mini'
+    ]);
+    const [fetchedGeminiModels, setFetchedGeminiModels] = React.useState<string[]>(['Gemini 3 Pro', 'Gemini 3 Flash', 'Gemini 2.5 Pro', 'Gemini 2.5 Flash', 'Gemini 2.5 Flash-Lite']);
+
+    React.useEffect(() => {
+        let isMounted = true;
+        const fetchModels = async () => {
+            try {
+                if (apiProvider === 'openai') {
+                    const targetProvider = savedProvider === 'openai-codex' ? 'openai-codex' : 'openai';
+                    const fetchedModels = await (globalThis as any).electron.ipcRenderer.invoke('ai.fetchOnlineModels', targetProvider);
+                    const fallbackModels = ['GPT-5.4', 'GPT-5.4-Mini', 'GPT-5.3-Codex', 'GPT-5.2', 'GPT-5.2-Codex', 'GPT-5.1-Codex-Max', 'GPT-5.1-Codex-Mini'];
+                    const models = fetchedModels && fetchedModels.length > 0 ? fetchedModels : fallbackModels;
+                    if (isMounted && models && models.length > 0) {
+                        setFetchedOpenAIModels(models);
+                    }
+                } else if (apiProvider === 'google') {
+                    const models = await (globalThis as any).electron.ipcRenderer.invoke('ai.fetchOnlineModels', 'gemini');
+                    if (isMounted && models && models.length > 0) {
+                        setFetchedGeminiModels(models);
+                    }
+                }
+            } catch (err) {
+                console.error('Failed to fetch online models:', err);
+            }
+        };
+        fetchModels();
+        return () => { isMounted = false; };
+    }, [apiProvider, savedProvider]);
 
     return (
         <div className="settings-content-inner">
@@ -355,8 +394,8 @@ export const ApiSection: React.FC<ApiSectionProps> = ({
                                             void syncAnalysisModelToMain(apiProvider, val);
                                         }}
                                         options={apiProvider === 'google'
-                                            ? ['Gemini 3 Pro', 'Gemini 3 Flash', 'Gemini 2.5 Pro', 'Gemini 2.5 Flash', 'Gemini 2.5 Flash-Lite']
-                                            : ['GPT-5.2 Standard', 'GPT-5.2 Mini', 'GPT-4.1 Standard', 'GPT-4o', 'o1']
+                                            ? fetchedGeminiModels
+                                            : fetchedOpenAIModels
                                         }
                                     />
                                 </div>

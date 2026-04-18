@@ -156,6 +156,104 @@ export function registerAIIpc(db: DatabaseManager): void {
     return provider.listModels();
   });
 
+  ipcMain.handle('ai.fetchOnlineModels', async (_event, providerId: AIProviderId) => {
+    if (providerId === 'openai-codex') {
+        return await new Promise<string[]>((resolve) => {
+          const WebSocket = require('ws');
+          const ws = new WebSocket("ws://127.0.0.1:4500");
+          const timeout = setTimeout(() => {
+            ws.close();
+            resolve([]);
+          }, 5000);
+
+          ws.on('open', () => {
+            ws.send(JSON.stringify({
+              method: "initialize",
+              id: 1,
+              params: {
+                clientInfo: {
+                  name: "neo_desktop",
+                  title: "NEO Desktop",
+                  version: "1.0.0"
+                }
+              }
+            }));
+            ws.send(JSON.stringify({
+              method: "initialized",
+              params: {}
+            }));
+            ws.send(JSON.stringify({
+              method: "model/list",
+              id: 2,
+              params: {
+                limit: 50,
+                includeHidden: true
+              }
+            }));
+          });
+
+          ws.on('message', (data: any) => {
+            try {
+              const msg = JSON.parse(data.toString());
+              if (msg.id === 2) {
+                clearTimeout(timeout);
+                ws.close();
+                if (msg.result && msg.result.data) {
+                  resolve(msg.result.data.map((m: any) => m.model || m.id));
+                } else {
+                  resolve([]);
+                }
+              }
+            } catch (e) {}
+          });
+
+          ws.on('error', (err: any) => {
+            logger.error({ err }, "Codex server WebSocket error");
+            clearTimeout(timeout);
+            resolve([]);
+          });
+        });
+      }
+
+      const keyPool = new ApiKeyPool(db, keyStorage);
+      const key = await keyPool.getNextKeyAsync(providerId);
+
+      if (!key || !key.key) {
+        const provider = providerManager.getProvider(providerId);
+        return provider ? provider.listModels().then(m => m.map(x => x.name)) : [];
+      }
+
+    try {
+      if (providerId === 'openai') {
+        const response = await fetch("https://api.openai.com/v1/models", {
+          method: "GET",
+          headers: {
+            "Authorization": `Bearer ${key.key}`,
+          },
+        });
+        if (response.ok) {
+          const data = await response.json();
+          return (data.data || []).map((m: any) => m.id);
+        }
+      } else if (providerId === 'gemini') {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models?key=${key.key}`,
+          { method: "GET" }
+        );
+        if (response.ok) {
+          const data = await response.json();
+          return (data.models || []).map((m: any) => m.name.replace('models/', ''));
+        }
+      }
+    } catch (error) {
+      logger.error({ err: error }, 'Failed to fetch online models');
+    }
+    
+    // Fallback if network fails
+    const provider = providerManager.getProvider(providerId);
+    return provider ? provider.listModels().then(m => m.map(x => x.name)) : [];
+  });
+
   // ========== API Keys ==========
 
   ipcMain.handle('ai.addKey', async (_event, { providerId, key, alias }: { providerId: string; key: string; alias: string }) => {

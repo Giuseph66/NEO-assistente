@@ -7,6 +7,7 @@ import { FeaturesSection } from './SettingsSections/FeaturesSection';
 import { ShortcutsSection } from './SettingsSections/ShortcutsSection';
 import { AIPromptsSection } from './SettingsSections/AIPromptsSection';
 import { DashboardSection } from './SettingsSections/DashboardSection';
+import { StorageSection } from './SettingsSections/StorageSection';
 import { HelpSection } from './SettingsSections/HelpSection';
 import { AutomationSettings } from '../../pages/Settings/AutomationSettings';
 import './SettingsModal.css';
@@ -26,6 +27,7 @@ type SettingsSection =
     | 'ai-prompts'
     | 'dashboard'
     | 'automation'
+    | 'storage'
     | 'help';
 
 const OPENAI_ANALYSIS_LABEL_TO_ID: Record<string, string> = {
@@ -104,9 +106,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
 
     // Audio states
     const [selectedMic, setSelectedMic] = useState('Microfone Padrão');
-    const [selectedSystemAudio, setSelectedSystemAudio] = useState('Áudio do Sistema (Nativo)');
+    const [selectedSystemAudio, setSelectedSystemAudio] = useState('__default__');
     const [micDevices, setMicDevices] = useState<{ id: string; label: string }[]>([]);
-    const [systemAudioSources, setSystemAudioSources] = useState<{ id: string; name: string }[]>([]);
+    const [systemAudioSources, setSystemAudioSources] = useState<{ id: string; name: string; isMonitor?: boolean; isDefaultCandidate?: boolean }[]>([]);
     const sttMicAnalyser = useSttMicAnalyser();
     const [localAnalyser, setLocalAnalyser] = useState<AnalyserNode | null>(null);
     const localStreamRef = useRef<MediaStream | null>(null);
@@ -203,7 +205,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                 const sources = await (globalThis as any).window.electron.ipcRenderer.invoke('systemAudio.listSources');
                 if (sources && Array.isArray(sources)) {
                     setSystemAudioSources(sources);
-                    setSelectedSystemAudio('Padrão');
+                    setSelectedSystemAudio('__default__');
                 }
             } catch (error) {
                 console.error('Failed to fetch settings data:', error);
@@ -337,13 +339,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
             try {
                 if (!isMounted) return;
 
-                let source = systemAudioSources.find((s: { name: string; id: string }) => s.name === selectedSystemAudio);
-                if (selectedSystemAudio === 'Padrão') {
-                    source = systemAudioSources.find((s: any) => s.isDefaultCandidate) || systemAudioSources[0];
+                const monitorSources = systemAudioSources.filter((s) => s.isMonitor);
+                let source = monitorSources.find((s) => s.id === selectedSystemAudio);
+                if (selectedSystemAudio === '__default__' || selectedSystemAudio === 'Padrão') {
+                    source = monitorSources.find((s) => s.isDefaultCandidate) || monitorSources[0];
                 }
 
                 if (!source?.id) {
-                    console.warn('No system audio source selected');
+                    console.warn('No system monitor audio source selected');
                     return;
                 }
 
@@ -440,6 +443,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                 return <AIPromptsSection showToast={showToast} />;
             case 'dashboard':
                 return <DashboardSection />;
+            case 'storage':
+                return <StorageSection showToast={showToast} />;
             case 'automation':
                 return <AutomationSettings />;
         }
@@ -501,6 +506,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                         <button className={`sidebar-item ${activeSection === 'automation' ? 'active' : ''}`} onClick={() => setActiveSection('automation')}>
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2" /><line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="17" x2="12" y2="21" /></svg>
                             <span>Automação</span>
+                        </button>
+                        <button className={`sidebar-item ${activeSection === 'storage' ? 'active' : ''}`} onClick={() => setActiveSection('storage')}>
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>
+                            <span>Armazenamento</span>
                         </button>
                         <button className={`sidebar-item ${activeSection === 'help' ? 'active' : ''}`} onClick={() => setActiveSection('help')}>
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12" y2="17" /></svg>

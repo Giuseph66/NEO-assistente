@@ -267,10 +267,10 @@ export class RecorderService {
       sumSquares += sample * sample;
     }
     const rms = Math.sqrt(sumSquares / sampleCount);
-    const target = Math.min(1, rms / 4000);
-    this.level = this.level * 0.8 + target * 0.2;
+    const target = Math.min(1, rms / 3200);
+    this.level = this.level * 0.35 + target * 0.65;
 
-    if (now - this.lastLevelAt >= 50) {
+    if (now - this.lastLevelAt >= 33) {
       this.lastLevelAt = now;
       this.emitter.emit('level', { level: this.level, rms, ts: now });
     }

@@ -26,8 +26,7 @@ export class Gateway {
             this.setupHandlers();
             logger.info({ port }, 'Gateway started');
         } catch (error) {
-            logger.error({ err: error, port }, 'Failed to start gateway');
-            throw error;
+            logger.error({ err: error, port }, 'Failed to start gateway (possibly already in use, continuing without overlay websocket)');
         }
     }
 
@@ -51,6 +50,10 @@ export class Gateway {
 
     private setupHandlers() {
         if (!this.wss) return;
+
+        this.wss.on('error', (error) => {
+            logger.error({ err: error }, 'Gateway WebSocketServer critical error (EADDRINUSE, etc)');
+        });
 
         this.wss.on('connection', (ws) => {
             logger.info('Client connected to gateway');

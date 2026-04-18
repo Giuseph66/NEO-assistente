@@ -274,63 +274,15 @@ export const OpenAIAuth: React.FC<OpenAIAuthProps> = ({ embedded = false, onProv
             )}
 
 
-
-            {/* Profile Selector */}
-            <div className="oauth-profiles">
-                <div className="oauth-profiles-header">
-                    <label>Perfil</label>
-                    <button
-                        className="oauth-add-profile-btn"
-                        onClick={() => setShowNewProfile(!showNewProfile)}
-                        title="Adicionar novo perfil"
-                    >
-                        {showNewProfile ? '✕' : '＋'}
-                    </button>
-                </div>
-
-                {showNewProfile && (
-                    <div className="oauth-new-profile-form">
-                        <input
-                            type="text"
-                            value={newProfileId}
-                            onChange={(e) => setNewProfileId(e.target.value.toLowerCase().replace(/\s+/g, '-'))}
-                            placeholder="ID (ex: work)"
-                            className="oauth-input oauth-input-sm"
-                        />
-                        <input
-                            type="text"
-                            value={newProfileLabel}
-                            onChange={(e) => setNewProfileLabel(e.target.value)}
-                            placeholder="Nome (ex: Trabalho)"
-                            className="oauth-input oauth-input-sm"
-                        />
-                        <button className="btn btn-sm btn-success" onClick={handleAddProfile}>
-                            Criar
-                        </button>
-                    </div>
-                )}
-
                 <div className="oauth-profile-tabs">
-                    {profiles.length === 0 && !showNewProfile && (
-                        <button
-                            className={`oauth-profile-tab ${selectedProfileId === 'default' ? 'active' : ''}`}
-                            onClick={() => setSelectedProfileId('default')}
-                        >
-                            👤 Personal
-                        </button>
-                    )}
                     {profiles.map((p) => (
-                        <button
-                            key={p.profileId}
-                            className={`oauth-profile-tab ${selectedProfileId === p.profileId ? 'active' : ''}`}
-                            onClick={() => handleSetActiveProfile(p.profileId)}
-                        >
-                            {p.isActive ? '🟢' : '⚪'} {p.label}
-                            {p.isExpired && <span className="oauth-expired-badge">expirado</span>}
-                        </button>
+                        p.isExpired ? (
+                            <span key={p.profileId} className="oauth-expired-badge">
+                                expirado
+                            </span>
+                        ) : null
                     ))}
                 </div>
-            </div>
 
             {/* Main Action Area */}
             <div className="oauth-action-area">
@@ -418,12 +370,6 @@ export const OpenAIAuth: React.FC<OpenAIAuthProps> = ({ embedded = false, onProv
                             Conectado
                         </div>
                         <div className="oauth-connected-details">
-                            {activeProfile.accountId && (
-                                <div className="oauth-detail-row">
-                                    <span className="oauth-detail-label">Conta:</span>
-                                    <span className="oauth-detail-value">{activeProfile.accountId}</span>
-                                </div>
-                            )}
                             <div className="oauth-detail-row">
                                 <span className="oauth-detail-label">Expira:</span>
                                 <span className={`oauth-detail-value ${activeProfile.isExpired ? 'oauth-expired' : ''}`}>

@@ -1,0 +1,57 @@
+
+> neo-desktop@0.0.1 prebuild
+> node scripts/repair-react-deps.js && node scripts/patch-xyflow-exports.js
+
+repair-react-deps: fonte não encontrada para @electron-toolkit/.ignored_preload
+repair-react-deps: fonte não encontrada para @electron-toolkit/.ignored_utils
+repair-react-deps: fonte não encontrada para @nut-tree-fork/.ignored_nut-js
+repair-react-deps: fonte não encontrada para @types/.ignored_react
+repair-react-deps: fonte não encontrada para @xyflow/.ignored_react
+repair-react-deps: dependências verificadas
+patch-xyflow-exports: ensured jsx-runtime exports
+
+> neo-desktop@0.0.1 build
+> electron-vite build && npm run copy-migrations && npm run build-worker
+
+vite v5.4.21 building SSR bundle for production...
+transforming...
+✓ 88 modules transformed.
+[plugin:vite:reporter] [plugin vite:reporter] 
+(!) /home/jesus/Neurelix/NEO/apps/desktop/src/main/database.ts is dynamically imported by /home/jesus/Neurelix/NEO/apps/desktop/src/main/hotkeys.ts but also statically imported by /home/jesus/Neurelix/NEO/apps/desktop/src/main/automation/MappingService.ts, /home/jesus/Neurelix/NEO/apps/desktop/src/main/index.ts, /home/jesus/Neurelix/NEO/apps/desktop/src/main/ipc/automationIpc.ts, /home/jesus/Neurelix/NEO/apps/desktop/src/main/text-highlight-controller.ts, dynamic import will not move module into another chunk.
+
+rendering chunks...
+dist/main/index.js  599.10 kB
+✓ built in 9.99s
+vite v5.4.21 building SSR bundle for production...
+transforming...
+✓ 1 modules transformed.
+rendering chunks...
+dist/preload/index.js  27.76 kB
+✓ built in 103ms
+vite v5.4.21 building for production...
+transforming...
+✓ 40 modules transformed.
+x Build failed in 509ms
+error during build:
+[vite:esbuild] Transform failed with 1 error:
+/home/jesus/Neurelix/NEO/apps/desktop/src/renderer/components/Modals/SettingsSections/StorageSection.tsx:287:26: ERROR: Unterminated regular expression
+file: /home/jesus/Neurelix/NEO/apps/desktop/src/renderer/components/Modals/SettingsSections/StorageSection.tsx:287:26
+
+Unterminated regular expression
+285|                              </tbody>
+286|                          </table>
+287|                      </div>
+   |                            ^
+288|                              
+289|                  </div>
+
+    at failureErrorWithLog (/home/jesus/Neurelix/NEO/node_modules/.pnpm/esbuild@0.21.5/node_modules/esbuild/lib/main.js:1472:15)
+    at /home/jesus/Neurelix/NEO/node_modules/.pnpm/esbuild@0.21.5/node_modules/esbuild/lib/main.js:755:50
+    at responseCallbacks.<computed> (/home/jesus/Neurelix/NEO/node_modules/.pnpm/esbuild@0.21.5/node_modules/esbuild/lib/main.js:622:9)
+    at handleIncomingPacket (/home/jesus/Neurelix/NEO/node_modules/.pnpm/esbuild@0.21.5/node_modules/esbuild/lib/main.js:677:12)
+    at Socket.readFromStdout (/home/jesus/Neurelix/NEO/node_modules/.pnpm/esbuild@0.21.5/node_modules/esbuild/lib/main.js:600:7)
+    at Socket.emit (node:events:524:28)
+    at addChunk (node:internal/streams/readable:561:12)
+    at readableAddChunkPushByteMode (node:internal/streams/readable:512:3)
+    at Readable.push (node:internal/streams/readable:392:5)
+    at Pipe.onStreamRead (node:internal/stream_base_commons:191:23)

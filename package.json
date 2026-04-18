@@ -3,6 +3,7 @@
   "private": true,
   "scripts": {
     "dev": "pnpm --filter @neo/engine build && pnpm --filter neo-desktop dev",
+    "preview": "pnpm --filter neo-desktop preview",
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
@@ -15,5 +16,8 @@
     "@types/node": "^20.10.0",
     "electron-rebuild": "^3.2.9",
     "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "selfsigned": "^5.5.0"
   }
 }

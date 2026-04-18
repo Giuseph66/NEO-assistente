@@ -86,4 +86,4 @@ export function resetOAuthConfig(): OAuthConfig {
 }
 
 /** Scopes that codex_cli requires for model access */
-export const REQUIRED_MODEL_SCOPES = ['openid', 'offline_access', 'model.request'];
+export const REQUIRED_MODEL_SCOPES = ['openid', 'offline_access'];

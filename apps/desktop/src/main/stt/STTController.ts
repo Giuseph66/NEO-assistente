@@ -4,6 +4,7 @@ import { getLogger } from '@neo/logger';
 import { AudioSource } from './audio/AudioSource';
 import { ArecordAudioSource } from './audio/ArecordAudioSource';
 import { RendererAudioSource } from './audio/RendererAudioSource';
+import { PhoneMicAudioSource } from './audio/PhoneMicAudioSource';
 import { ModelManager } from './models/ModelManager';
 import { getConfigStore } from '../storage/configStore';
 import { createLiveTranscriptionProvider, normalizeLiveProviderId } from './providers/LiveProviderRegistry';
@@ -19,6 +20,7 @@ export class STTController {
   private status: STTStatus = { state: 'idle' };
   private provider: LiveTranscriptionProvider | null = null;
   private audioSource: AudioSource | null = null;
+  private audioSourceOverride: AudioSource | null = null; // PhoneMic override
   private emitter = new EventEmitter();
   private modelManager: ModelManager;
   private configStore = getConfigStore();
@@ -130,7 +132,12 @@ export class STTController {
       this.emitDebug('provider ready');
 
       const sourceType = process.env.RICKY_STT_SOURCE || 'arecord';
-      this.audioSource = sourceType === 'arecord' ? new ArecordAudioSource() : new RendererAudioSource();
+      // Se houver um override (ex: PhoneMicAudioSource), usa ele
+      this.audioSource = this.audioSourceOverride
+        ? this.audioSourceOverride
+        : sourceType === 'arecord'
+        ? new ArecordAudioSource()
+        : new RendererAudioSource();
       this.audioBytes = 0;
       this.lastAudioAt = Date.now();
       this.audioSource.onData((chunk) => {
@@ -200,6 +207,54 @@ export class STTController {
   onLevel(cb: (payload: { level: number; rms: number; ts: number }) => void): () => void {
     this.emitter.on('level', cb);
     return () => this.emitter.off('level', cb);
+  }
+
+  /** Retorna true se o STT está ativo (running ou listening) */
+  isRunning(): boolean {
+    return this.status.state === 'running' || this.status.state === 'listening';
+  }
+
+  /** Retorna o tipo da fonte de áudio atual */
+  getAudioSourceType(): 'phoneMic' | 'default' {
+    return this.audioSourceOverride instanceof PhoneMicAudioSource ? 'phoneMic' : 'default';
+  }
+
+  /**
+   * Define (ou limpa) um override de AudioSource.
+   * Se o STT já estiver rodando, faz hot-swap: para a fonte atual e inicia a nova.
+   */
+  async setAudioSourceOverride(source: AudioSource | null): Promise<void> {
+    this.audioSourceOverride = source;
+
+    if (!this.isRunning()) return; // STT parado: o override será usado no próximo start()
+
+    // Hot-swap: substitui a fonte sem parar o provider/transcrição
+    logger.info(
+      source ? 'STTController: hot-swapping audio source → PhoneMic' : 'STTController: hot-swapping audio source → default',
+    );
+
+    try {
+      await this.audioSource?.stop();
+    } catch {
+      // ignore
+    }
+
+    const newSource = source ?? (
+      process.env.RICKY_STT_SOURCE === 'renderer' ? new RendererAudioSource() : new ArecordAudioSource()
+    );
+    this.audioSource = newSource;
+
+    const config = this.getConfig();
+    newSource.onData((chunk) => {
+      this.audioBytes += chunk.length;
+      this.lastAudioAt = Date.now();
+      this.updateLevel(chunk);
+      this.provider?.pushAudio(chunk);
+    });
+    newSource.onError((error) => this.handleError(error.message));
+    await newSource.start({ sampleRate: config.sampleRate || 16000 });
+
+    logger.info('STTController: audio source hot-swap complete');
   }
 
   private setStatus(status: STTStatus): void {

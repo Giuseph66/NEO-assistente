@@ -858,6 +858,7 @@ export class OverlayManager {
       frame: false, // Frameless to avoid duplicate controls
       transparent: true,
       backgroundColor: '#00000000',
+      show: false,
       webPreferences: {
         preload: join(__dirname, '../preload/index.js'),
         nodeIntegration: false,
@@ -874,6 +875,18 @@ export class OverlayManager {
     } else {
       this.settingsWindow.loadFile(join(__dirname, '../renderer/index.html'), { hash: 'settings' });
     }
+
+    this.settingsWindow.once('ready-to-show', () => {
+      if (!this.settingsWindow || this.settingsWindow.isDestroyed()) return;
+      this.settingsWindow.center();
+      this.settingsWindow.show();
+      this.settingsWindow.focus();
+      logger.info('Settings window ready and shown');
+    });
+
+    this.settingsWindow.webContents.once('did-finish-load', () => {
+      logger.info('Settings window loaded');
+    });
 
     this.settingsWindow.on('closed', () => { this.settingsWindow = null; });
   }

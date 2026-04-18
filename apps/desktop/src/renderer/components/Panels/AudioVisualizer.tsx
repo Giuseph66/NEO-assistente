@@ -14,6 +14,8 @@ export function AudioVisualizer({ analyser, level, levelRef, width = 360, height
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const animationFrameRef = useRef<number | null>(null);
     const smoothedHeightsRef = useRef<number[]>([]);
+    const levelHistoryRef = useRef<number[]>([]);
+    const lastHistoryPushAtRef = useRef(0);
     const internalLevelRef = useRef(0);
     const externalLevelRef = levelRef;
 
@@ -38,6 +40,9 @@ export function AudioVisualizer({ analyser, level, levelRef, width = 360, height
         if (smoothedHeightsRef.current.length !== barCount) {
             smoothedHeightsRef.current = new Array(barCount).fill(0);
         }
+        if (levelHistoryRef.current.length !== barCount) {
+            levelHistoryRef.current = new Array(barCount).fill(0);
+        }
 
         const draw = () => {
             if (analyser && dataArray) {
@@ -53,11 +58,22 @@ export function AudioVisualizer({ analyser, level, levelRef, width = 360, height
             const centerY = h / 2;
             const centerX = w / 2;
 
-            // Smoothing factor (lower = smoother/slower, higher = more reactive)
-            const smoothing = 0.15;
+            // External levels already come smoothed from the main process.
+            const smoothing = analyser ? 0.15 : 0.55;
             const fallbackLevel = clampLevel(
                 externalLevelRef ? externalLevelRef.current : internalLevelRef.current
             );
+            if (!analyser) {
+                const now = performance.now();
+                if (now - lastHistoryPushAtRef.current >= 34) {
+                    lastHistoryPushAtRef.current = now;
+                    const shapedLevel = Math.pow(fallbackLevel, 0.58);
+                    levelHistoryRef.current = [
+                        shapedLevel,
+                        ...levelHistoryRef.current.slice(0, barCount - 1).map((value) => value * 0.96),
+                    ];
+                }
+            }
 
             for (let i = 0; i < barCount; i++) {
                 // Sample frequency data with averaging for better representation
@@ -77,8 +93,10 @@ export function AudioVisualizer({ analyser, level, levelRef, width = 360, height
                     }
                     rawValue = count > 0 ? (sum / count) / 255 : 0;
                 } else {
-                    const curve = 0.35 + 0.65 * Math.sin((i / barCount) * Math.PI);
-                    rawValue = fallbackLevel * curve;
+                    const historyValue = levelHistoryRef.current[i] || 0;
+                    const curve = 0.42 + 0.58 * Math.sin((1 - i / barCount) * Math.PI * 0.75);
+                    const ripple = 0.88 + 0.12 * Math.sin((performance.now() / 80) + i * 0.9);
+                    rawValue = historyValue * curve * ripple;
                 }
 
                 // Apply smoothing
