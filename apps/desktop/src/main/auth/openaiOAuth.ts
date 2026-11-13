@@ -10,6 +10,7 @@ import { startOAuthCallbackServer, extractCodeFromUrl } from './oauthServer';
 import { TokenStore, AuthProfile, maskToken } from './tokenStore';
 import { TokenRefresher } from './tokenRefresher';
 import { getOAuthConfig, REQUIRED_MODEL_SCOPES } from './authConfig';
+import { extractChatGptAccountId } from './chatgptAccount';
 
 const logger = getLogger();
 
@@ -251,16 +252,10 @@ export class OpenAIOAuthController {
             const expiresIn = data.expires_in || 3600;
             const expiresAt = Date.now() + expiresIn * 1000;
 
-            // Try to extract accountId from ID token (if available)
-            let accountId: string | undefined;
-            if (data.id_token) {
-                try {
-                    const payload = JSON.parse(
-                        Buffer.from(data.id_token.split('.')[1], 'base64').toString('utf-8')
-                    );
-                    accountId = payload.sub || payload.email;
-                } catch { /* ignore */ }
-            }
+            // ChatGPT workspace id (sent as `ChatGPT-Account-Id`). It is the
+            // `chatgpt_account_id` claim, not the JWT `sub`/email.
+            const accountId =
+                extractChatGptAccountId(data.id_token) || extractChatGptAccountId(data.access_token);
 
             const profile: AuthProfile = {
                 profileId,

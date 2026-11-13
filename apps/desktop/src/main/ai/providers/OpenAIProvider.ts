@@ -1,8 +1,29 @@
 import { BaseVisionProvider } from './BaseProvider';
-import { VisionRequest, VisionResponse, ChatRequest, ModelInfo, AIProviderId } from '@neo/shared';
+import { VisionRequest, VisionResponse, ChatRequest, ModelInfo, AIProviderId, ReasoningEffort } from '@neo/shared';
 import { getLogger } from '@neo/logger';
 import { getModelsForProvider } from '../modelCatalog';
 import { getOAuthController } from '../../auth/openaiOAuth';
+import { resolveChatGptAccountId } from '../../auth/chatgptAccount';
+import { OPENAI_CURRENT_MODELS, OPENAI_DEFAULT_MODEL } from '../openaiModels';
+
+export const CODEX_DEFAULT_MODEL = OPENAI_DEFAULT_MODEL;
+const REASONING_TIMEOUT_MS = 180_000;
+
+/**
+ * OpenAI reasoning models (o-series, GPT-5 family) reject `max_tokens` and any
+ * non-default `temperature` on Chat Completions; they take `max_completion_tokens`
+ * and `reasoning_effort` instead.
+ */
+export function isOpenAIReasoningModel(modelName: string): boolean {
+  const id = (modelName || '').trim().toLowerCase();
+  return /^o\d/.test(id) || id.startsWith('gpt-5');
+}
+
+/** Model ids are lowercase on both the API and the Codex backend (`gpt-5.3-codex`). */
+export function normalizeOpenAIModelId(modelName: string | undefined, fallback: string): string {
+  const id = (modelName || '').trim().toLowerCase();
+  return id || fallback;
+}
 
 const logger = getLogger();
 
@@ -22,27 +43,7 @@ export class OpenAIProvider extends BaseVisionProvider {
   }
 
   async listModels(): Promise<ModelInfo[]> {
-    const fallback: ModelInfo[] = this.transport === 'codex'
-      ? [
-        {
-          id: 'GPT-5.3-Codex',
-          name: 'GPT-5.3-Codex',
-          provider: this.id,
-          supportsVision: true,
-          maxTokens: 8192,
-          supportsStreaming: true,
-        },
-      ]
-      : [
-        {
-          id: 'gpt-4o',
-          name: 'GPT-4o',
-          provider: this.id,
-          supportsVision: true,
-          maxTokens: 4096,
-          supportsStreaming: false,
-        },
-      ];
+    const fallback: ModelInfo[] = OPENAI_CURRENT_MODELS.map((model) => ({ ...model, provider: this.id }));
 
     return getModelsForProvider(this.id, fallback);
   }
@@ -65,7 +66,7 @@ export class OpenAIProvider extends BaseVisionProvider {
       );
     }
 
-    const modelName = req.options?.modelName || 'gpt-4o';
+    const modelName = normalizeOpenAIModelId(req.options?.modelName, OPENAI_DEFAULT_MODEL);
     
     // Converte imagem para base64 se necessário
     let imageUrl: string;
@@ -118,15 +119,7 @@ export class OpenAIProvider extends BaseVisionProvider {
       }
     });
 
-    const maxTokens = this.normalizeMaxTokens(req.options?.maxTokens);
-    const requestBody: any = {
-      model: modelName,
-      messages,
-      temperature: req.options?.temperature ?? 0.7,
-    };
-    if (typeof maxTokens === 'number') {
-      requestBody.max_tokens = maxTokens;
-    }
+    const requestBody = this.buildChatCompletionsBody(modelName, messages, req.options);
 
     const url = `${this.baseUrl}/chat/completions`;
 
@@ -201,7 +194,7 @@ export class OpenAIProvider extends BaseVisionProvider {
       );
     }
 
-    const modelName = req.options?.modelName || 'gpt-4o';
+    const modelName = normalizeOpenAIModelId(req.options?.modelName, OPENAI_DEFAULT_MODEL);
 
     const messages: any[] = [];
     const systemMessage = req.messages.find((m) => m.role === 'system')?.content;
@@ -221,15 +214,7 @@ export class OpenAIProvider extends BaseVisionProvider {
         });
       });
 
-    const maxTokens = this.normalizeMaxTokens(req.options?.maxTokens);
-    const requestBody: any = {
-      model: modelName,
-      messages,
-      temperature: req.options?.temperature ?? 0.7,
-    };
-    if (typeof maxTokens === 'number') {
-      requestBody.max_tokens = maxTokens;
-    }
+    const requestBody = this.buildChatCompletionsBody(modelName, messages, req.options);
 
     const url = `${this.baseUrl}/chat/completions`;
 
@@ -297,6 +282,31 @@ export class OpenAIProvider extends BaseVisionProvider {
     return undefined;
   }
 
+  protected minTimeoutMsFor(modelName?: string): number {
+    if (this.transport === 'codex' || isOpenAIReasoningModel(modelName || '')) {
+      return REASONING_TIMEOUT_MS;
+    }
+    return 0;
+  }
+
+  /** Chat Completions body; reasoning models get their own parameter set. */
+  private buildChatCompletionsBody(
+    modelName: string,
+    messages: any[],
+    options: ChatRequest['options']
+  ): Record<string, any> {
+    const maxTokens = this.normalizeMaxTokens(options?.maxTokens);
+    const body: Record<string, any> = { model: modelName, messages };
+    if (isOpenAIReasoningModel(modelName)) {
+      if (typeof maxTokens === 'number') body.max_completion_tokens = maxTokens;
+      if (options?.reasoningEffort) body.reasoning_effort = options.reasoningEffort;
+      return body;
+    }
+    body.temperature = options?.temperature ?? 0.7;
+    if (typeof maxTokens === 'number') body.max_tokens = maxTokens;
+    return body;
+  }
+
   private isLikelyOAuthToken(token: string): boolean {
     if (!token) return false;
     const trimmed = token.trim();
@@ -313,23 +323,26 @@ export class OpenAIProvider extends BaseVisionProvider {
     return error;
   }
 
-  private getChatGptAccountId(): string | undefined {
+  private getChatGptAccountId(accessToken: string): string | undefined {
+    let storedAccountId: string | undefined;
     try {
-      const controller = getOAuthController();
-      const store = controller.getTokenStore();
+      const store = getOAuthController().getTokenStore();
       const activeProfileId = store.getActiveProfileId();
-      if (!activeProfileId) return undefined;
-      const profile = store.getProfile(activeProfileId);
-      return profile?.accountId || undefined;
+      storedAccountId = activeProfileId ? store.getProfile(activeProfileId)?.accountId : undefined;
     } catch {
-      return undefined;
+      storedAccountId = undefined;
     }
+    return resolveChatGptAccountId(accessToken, storedAccountId);
   }
 
   private resolveCodexModel(modelName?: string): string {
-    const candidate = (modelName || '').trim();
-    if (!candidate) return 'GPT-5.3-Codex';
-    return candidate;
+    return normalizeOpenAIModelId(modelName, CODEX_DEFAULT_MODEL);
+  }
+
+  private applyCodexReasoning(body: any, effort?: ReasoningEffort): void {
+    if (effort) {
+      body.reasoning = { effort };
+    }
   }
 
   private isCodexUnsupportedModelError(status: number, errorMessage: string, errorType: string): boolean {
@@ -401,7 +414,7 @@ export class OpenAIProvider extends BaseVisionProvider {
       Authorization: `Bearer ${accessToken}`,
     };
     if (includeAccountId) {
-      const accountId = this.getChatGptAccountId();
+      const accountId = this.getChatGptAccountId(accessToken);
       if (accountId) {
         headers['chatgpt-account-id'] = accountId;
       }
@@ -659,14 +672,14 @@ export class OpenAIProvider extends BaseVisionProvider {
             if (
               !didModelFallback &&
               this.isCodexUnsupportedModelError(errorInfo.status, errorInfo.message, errorInfo.type) &&
-              modelToUse !== 'GPT-5.3-Codex'
+              modelToUse !== CODEX_DEFAULT_MODEL
             ) {
               didModelFallback = true;
               shouldRetryWithFallbackModel = true;
-              modelToUse = 'GPT-5.3-Codex';
+              modelToUse = CODEX_DEFAULT_MODEL;
               logger.warn(
                 { requestedModel, fallbackModel: modelToUse, mode, status: errorInfo.status, errorType: errorInfo.type },
-                'Codex backend rejected selected model, retrying with GPT-5.3-Codex'
+                'Codex backend rejected selected model, retrying with the default Codex model'
               );
               break;
             }
@@ -746,6 +759,8 @@ export class OpenAIProvider extends BaseVisionProvider {
         };
         this.applyCodexMaxTokens(primaryBody, maxTokens);
         this.applyCodexMaxTokens(fallbackBody, maxTokens);
+        this.applyCodexReasoning(primaryBody, req.options?.reasoningEffort);
+        this.applyCodexReasoning(fallbackBody, req.options?.reasoningEffort);
         return [primaryBody, fallbackBody];
       },
       accessToken,
@@ -831,6 +846,8 @@ export class OpenAIProvider extends BaseVisionProvider {
         };
         this.applyCodexMaxTokens(primaryBody, maxTokens);
         this.applyCodexMaxTokens(fallbackBody, maxTokens);
+        this.applyCodexReasoning(primaryBody, req.options?.reasoningEffort);
+        this.applyCodexReasoning(fallbackBody, req.options?.reasoningEffort);
         return [primaryBody, fallbackBody];
       },
       accessToken,

@@ -2,6 +2,10 @@ import { BrowserWindow, ipcMain, app } from 'electron';
 import { join, parse, resolve } from 'path';
 import { existsSync } from 'fs';
 import { FileTranscriber } from '../stt/file/FileTranscriber';
+import { CodexFileTranscriber } from '../stt/file/CodexFileTranscriber';
+import { writeSubtitleFiles } from '../stt/file/subtitleFiles';
+import { CodexTranscriptionClient } from '../stt/codex/CodexTranscriptionClient';
+import { getCodexCredentials } from '../auth/codexCredentials';
 import { DatabaseManager } from '../database';
 import { ModelManager } from '../stt/models/ModelManager';
 import { SubtitleSegment, TranscribeFileRequest } from '@neo/shared';
@@ -32,6 +36,9 @@ export function registerTranscribeFileIpc(
   modelManager: ModelManager
 ): void {
   const transcriber = new FileTranscriber();
+  const codexTranscriber = new CodexFileTranscriber(
+    new CodexTranscriptionClient({ getCredentials: getCodexCredentials })
+  );
   let busy = false;
 
   const recordingsDir = join(app.getPath('userData'), 'recordings');
@@ -47,6 +54,29 @@ export function registerTranscribeFileIpc(
     }
     if (!existsSync(wavPath)) {
       throw new Error('Arquivo nao encontrado');
+    }
+
+    if (payload.engine === 'codex') {
+      busy = true;
+      const offCodexProgress = codexTranscriber.onProgress((progress) =>
+        broadcast('transcribe.progress', { ...progress, wavPath })
+      );
+      try {
+        const segments = await codexTranscriber.transcribeFile(wavPath, payload.language);
+        const files = await writeSubtitleFiles(parse(wavPath).name, segments, payload.exportFormat);
+        const recording = db.getRecordingByPath(wavPath);
+        if (recording) {
+          db.saveRecordingSubtitles(recording.id, files.vttPath || null, files.srtPath || null, payload.language);
+        }
+        broadcast('transcribe.done', { wavPath, ...files, segmentsCount: segments.length });
+        return { segments, ...files };
+      } catch (error: any) {
+        broadcast('transcribe.error', { message: error?.message || 'Erro ao transcrever' });
+        throw error;
+      } finally {
+        offCodexProgress();
+        busy = false;
+      }
     }
 
     const installed = modelManager.listInstalled();

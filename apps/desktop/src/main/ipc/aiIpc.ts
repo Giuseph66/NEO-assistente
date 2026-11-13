@@ -1,4 +1,7 @@
 import { ipcMain, BrowserWindow } from 'electron';
+import { listAnthropicModelIds } from '../ai/providers/AnthropicProvider';
+import { getCodexCli } from '../ai/codexCli/CodexCli';
+import { filterOpenAIChatModelIds } from '../ai/openaiModels';
 import { DatabaseManager } from '../database';
 import { getAIService, getKeyStorage } from '../ai/AIServiceManager';
 import { getAIProviderManager } from '../ai/AIProviderManager';
@@ -90,6 +93,21 @@ export function registerAIIpc(db: DatabaseManager): void {
         display_name: 'OpenAI (OAuth Codex)',
         base_url: 'https://chatgpt.com/backend-api/codex',
       });
+      db.saveAIProvider({
+        id: 'anthropic',
+        display_name: 'Anthropic Claude (API Key)',
+        base_url: 'https://api.anthropic.com',
+      });
+      db.saveAIProvider({
+        id: 'claude-code',
+        display_name: 'Claude (assinatura via Claude Code)',
+        base_url: 'claude-code-cli',
+      });
+      db.saveAIProvider({
+        id: 'codex-cli',
+        display_name: 'ChatGPT (assinatura via Codex CLI)',
+        base_url: 'codex-cli',
+      });
     } catch (error) {
       logger.warn({ err: error }, 'Failed to ensure default AI providers');
     }
@@ -144,7 +162,13 @@ export function registerAIIpc(db: DatabaseManager): void {
             ? 'OpenAI (API Key)'
             : p.id === 'openai-codex'
               ? 'OpenAI (OAuth Codex)'
-              : p.id,
+              : p.id === 'anthropic'
+                ? 'Anthropic Claude (API Key)'
+                : p.id === 'claude-code'
+                  ? 'Claude (assinatura via Claude Code)'
+                  : p.id === 'codex-cli'
+                    ? 'ChatGPT (assinatura via Codex CLI)'
+                    : p.id,
     }));
   });
 
@@ -157,6 +181,22 @@ export function registerAIIpc(db: DatabaseManager): void {
   });
 
   ipcMain.handle('ai.fetchOnlineModels', async (_event, providerId: AIProviderId) => {
+    if (providerId === 'codex-cli') {
+      // The account's real model list, straight from the CLI; static list if it is unavailable.
+      try {
+        const models = await getCodexCli().listModels();
+        if (models.length > 0) return models.map((m) => m.id);
+      } catch (error) {
+        logger.warn({ err: error }, 'Failed to list Codex CLI models');
+      }
+      const provider = providerManager.getProvider('codex-cli');
+      return provider ? (await provider.listModels()).map((m) => m.id) : [];
+    }
+    if (providerId === 'claude-code') {
+      // The CLI has no model listing; it accepts the same ids as the API.
+      const provider = providerManager.getProvider('claude-code');
+      return provider ? (await provider.listModels()).map((m) => m.id) : [];
+    }
     if (providerId === 'openai-codex') {
         return await new Promise<string[]>((resolve) => {
           const WebSocket = require('ws');
@@ -220,7 +260,7 @@ export function registerAIIpc(db: DatabaseManager): void {
 
       if (!key || !key.key) {
         const provider = providerManager.getProvider(providerId);
-        return provider ? provider.listModels().then(m => m.map(x => x.name)) : [];
+        return provider ? provider.listModels().then(m => m.map(x => x.id)) : [];
       }
 
     try {
@@ -233,8 +273,11 @@ export function registerAIIpc(db: DatabaseManager): void {
         });
         if (response.ok) {
           const data = await response.json();
-          return (data.data || []).map((m: any) => m.id);
+          return filterOpenAIChatModelIds((data.data || []).map((m: any) => m.id));
         }
+      } else if (providerId === 'anthropic') {
+        const ids = await listAnthropicModelIds(key.key);
+        if (ids.length > 0) return ids;
       } else if (providerId === 'gemini') {
         const response = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models?key=${key.key}`,
@@ -251,7 +294,7 @@ export function registerAIIpc(db: DatabaseManager): void {
     
     // Fallback if network fails
     const provider = providerManager.getProvider(providerId);
-    return provider ? provider.listModels().then(m => m.map(x => x.name)) : [];
+    return provider ? provider.listModels().then(m => m.map(x => x.id)) : [];
   });
 
   // ========== API Keys ==========
@@ -346,6 +389,11 @@ export function registerAIIpc(db: DatabaseManager): void {
             },
           });
           return response.ok;
+        }
+
+        if (providerId === 'anthropic') {
+          const ids = await listAnthropicModelIds(key);
+          return ids.length > 0;
         }
 
         if (providerId === 'openai-codex') {

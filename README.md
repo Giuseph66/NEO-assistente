@@ -89,48 +89,70 @@ assistente-pessoal/
 
 ## 🛠️ Setup
 
+### Início rápido
+
+```bash
+git clone <url-do-repo> && cd NEO-assistente
+nvm install && nvm use   # Node 20–24 (o .nvmrc recomenda o 24)
+corepack enable          # ativa o pnpm na versão fixada no package.json
+pnpm install             # instala, baixa o Electron, compila módulos nativos e os pacotes
+pnpm check               # confere se está tudo certo e diz como corrigir o que faltar
+pnpm dev                 # abre o app
+```
+
+O `pnpm install` já faz tudo que antes era manual: baixa o binário do Electron, recompila
+os módulos nativos (`better-sqlite3`, `vosk`, `ffi-napi`...) para o Electron e compila
+`packages/*` e `services/engine`.
+
+> **Versão do Node:** use **Node 20 a 24** (recomendado: 24). Com outra versão o `pnpm install` para logo no
+> início com `ERR_PNPM_UNSUPPORTED_ENGINE`; rode `nvm use` e tente de novo.
+
 ### Dependências do Sistema (Linux)
 
-```bash
-# Node.js e pnpm
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
-npm install -g pnpm
-
-# Dependências de build
-sudo apt install -y \
-  build-essential \
-  libffi-dev \
-  libvips-dev \
-  python3-dev
-
-# Áudio (PipeWire ou PulseAudio)
-sudo apt install -y pipewire pipewire-pulse
-
-# Wayland portals (para captura de tela)
-sudo apt install -y xdg-desktop-portal xdg-desktop-portal-gtk
-
-# Captura de tela interativa
-sudo apt install -y slurp grim   # Wayland
-sudo apt install -y maim         # X11
-```
-
-### Instalação
+Obrigatórias, para compilar os módulos nativos:
 
 ```bash
-# Clone e instale dependências
-cd /home/jesus/Neurelix/assistente\ pessoal
-pnpm install
-
-# Rebuild de modulos nativos (vosk/better-sqlite3)
-pnpm --filter ricky-desktop rebuild:electron
-
-# Build dos packages
-pnpm build
-
-# Desenvolvimento
-pnpm dev
+sudo apt install -y build-essential python3 python3-dev libffi-dev
 ```
+
+Opcionais, cada uma liga um recurso (o `pnpm check` avisa quais estão faltando):
+
+```bash
+sudo apt install -y alsa-utils                 # microfone (transcrição)
+pip install vosk                               # transcrição offline
+sudo apt install -y ffmpeg                     # gravações
+sudo apt install -y tesseract-ocr tesseract-ocr-por tesseract-ocr-eng  # OCR / tradução
+sudo apt install -y grim slurp                 # captura de área (Wayland)
+sudo apt install -y maim                       # captura de área (X11)
+sudo apt install -y xdg-desktop-portal xdg-desktop-portal-gtk  # captura de tela no Wayland
+```
+
+### Usar a assinatura (sem chave de API)
+
+O app usa as assinaturas do **Claude** e do **ChatGPT** através dos CLIs oficiais — o próprio CLI faz a
+chamada com o seu login; o app não lê nem guarda o token. Instale e faça login uma vez:
+
+```bash
+npm i -g @anthropic-ai/claude-code && claude auth login   # assinatura Claude (Pro/Max)
+npm i -g @openai/codex && codex login                     # assinatura ChatGPT (Plus/Pro)
+```
+
+Depois, em **Configurações > API e Modelos**, escolha **Anthropic Claude** ou **OpenAI** e clique em
+**Usar assinatura**. Cada chamada roda isolada (sem ferramentas de escrita, sem o seu `AGENTS.md`/skills/hooks)
+e consome a cota da assinatura. A transcrição de áudio não passa por esses CLIs.
+
+### Deu problema?
+
+| Sintoma | Solução |
+|---|---|
+| `ERR_PNPM_UNSUPPORTED_ENGINE` | `nvm use` (Node 20–24) |
+| `electron-vite: not found` | instalação interrompida → `pnpm install` |
+| Erro estranho de dependência / módulo nativo | `pnpm reinstall` (apaga `node_modules` e `dist` e instala de novo) |
+| `self-register`, `NODE_MODULE_VERSION`, `native callback` | `pnpm rebuild:native` |
+| `Cannot find module '@neo/...'` | `pnpm build:libs` |
+| Janela abre vazia/transparente | erro no renderer: abra `http://localhost:5173/#settings` no navegador e veja o console |
+
+Em qualquer caso, `pnpm check` lista o que está errado e o comando para corrigir.
 
 ## 📝 Configuração
 
@@ -200,7 +222,7 @@ sudo apt install -y ffmpeg
 - `arecord` não encontrado: instale `alsa-utils`.
 - Erro de permissão no microfone: verifique permissões do usuário.
 - Modelos inválidos: o diretório precisa conter `conf/` e `am/` ou `graph/`.
-- Erro `native callback`/`self-register`: rode `pnpm --filter ricky-desktop rebuild:electron` e verifique `libffi-dev`.
+- Erro `native callback`/`self-register`: rode `pnpm rebuild:native` e verifique `libffi-dev`.
 
 ## 🎙️ Transcrição Realtime (OpenAI / Gemini)
 
@@ -237,12 +259,20 @@ pip install argostranslate
 
 ### Scripts Disponíveis
 
-- `pnpm dev` - Inicia app em modo desenvolvimento (Atenção: este comando recompila as dependências nativas, o que demora bastante)
-- `pnpm --filter neo-desktop preview` - **Alternativa muito mais rápida:** Inicia o app compilado sem recompilar dependências nativas. Você também pode navegar até `apps/desktop` e rodar `npm run preview`.
-- `pnpm build` - Build de produção
-- `pnpm typecheck` - Verificação de tipos
-- `pnpm build:engine` - Build do engine STT
-- `pnpm dev:engine` - Desenvolvimento do engine
+Todos rodam a partir da raiz do repositório:
+
+| Comando | O que faz |
+|---|---|
+| `pnpm dev` | Compila os pacotes do workspace e abre o app com hot reload |
+| `pnpm preview` | Abre o app já compilado (sem hot reload) |
+| `pnpm check` | Diagnóstico do ambiente, com o comando de correção de cada problema |
+| `pnpm dist` | Gera o instalador (`.deb` + AppImage) em `apps/desktop/dist-release/` |
+| `pnpm dist:deb` / `pnpm dist:appimage` | Gera só um dos formatos |
+| `pnpm rebuild:native` | Recompila os módulos nativos para o Electron |
+| `pnpm build:libs` | Compila `packages/*` e `services/engine` |
+| `pnpm clean` / `pnpm reinstall` | Apaga `node_modules`/`dist` (e reinstala) |
+| `pnpm typecheck` | Verificação de tipos |
+| `pnpm build:engine` / `pnpm dev:engine` | Build / desenvolvimento só do engine STT |
 
 ### Estrutura de Packages
 

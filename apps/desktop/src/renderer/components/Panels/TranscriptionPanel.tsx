@@ -425,9 +425,12 @@ export function TranscriptionPanel(): JSX.Element {
     setTranscribeError(null);
     setTranscribeProgress({ percent: 0, currentTimeMs: 0, wavPath: recording.path });
     try {
+      const sttConfig = await window.stt?.getConfig?.().catch(() => null);
       const result = await window.transcribeFile.start({
         wavPath: recording.path,
         exportFormat: 'both',
+        // Codex selected as transcription model → use it for recordings too; otherwise Vosk (offline).
+        engine: sttConfig?.provider === 'codex_transcribe' ? 'codex' : 'vosk',
       });
       const audioUrl = await window.recorder.getFileUrl(recording.path);
       setSubtitleState({
@@ -438,7 +441,8 @@ export function TranscriptionPanel(): JSX.Element {
         srtPath: result.srtPath,
       });
     } catch (error) {
-      setTranscribeError('Falha ao transcrever gravacao');
+      const detail = error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') : '';
+      setTranscribeError(detail ? `Falha ao transcrever gravacao: ${detail}` : 'Falha ao transcrever gravacao');
     } finally {
       setTranscribeProgress(null);
     }

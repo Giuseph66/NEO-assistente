@@ -2,7 +2,23 @@
  * Tipos compartilhados para sistema de análise de IA
  */
 
-export type AIProviderId = 'gemini' | 'openai' | 'openai-codex' | 'ollama' | 'custom';
+export type AIProviderId =
+  | 'gemini'
+  | 'openai'
+  | 'openai-codex'
+  | 'anthropic'
+  /** Claude via the user's Claude.ai subscription, through the Claude Code CLI. */
+  | 'claude-code'
+  /** ChatGPT subscription through the Codex CLI (`codex exec`). */
+  | 'codex-cli'
+  | 'ollama'
+  | 'custom';
+
+/**
+ * Reasoning depth for models that think before answering
+ * (OpenAI reasoning models / Codex, Claude). Providers map it to their own knob.
+ */
+export type ReasoningEffort = 'low' | 'medium' | 'high';
 
 export interface ModelInfo {
   id: string;
@@ -33,6 +49,7 @@ export interface VisionRequest {
     timeoutMs?: number;
     stream?: boolean;
     modelName?: string;
+    reasoningEffort?: ReasoningEffort;
   };
 }
 
@@ -47,6 +64,7 @@ export interface ChatRequest {
     timeoutMs?: number;
     stream?: boolean;
     modelName?: string;
+    reasoningEffort?: ReasoningEffort;
   };
 }
 
@@ -73,6 +91,7 @@ export interface VisionRequestLegacy {
     timeoutMs?: number;
     stream?: boolean;
     modelName?: string;
+    reasoningEffort?: ReasoningEffort;
   };
 }
 
@@ -102,6 +121,7 @@ export interface AIConfig {
   enableImageOptimization: boolean;
   fallbackMaxAttempts: number;
   fallbackCooldownMinutes: number;
+  reasoningEffort?: ReasoningEffort;
 }
 
 export interface ApiKeyInfo {

@@ -3,14 +3,20 @@ packages:
   - packages/*
   - services/*
 
-ignoredBuiltDependencies:
-  - electron
-  - ffi-napi
-  - lzma-native
-  - ref-napi
-
+# Native/binary packages whose install scripts must run.
+# - electron: downloads the Electron binary (without it `electron-vite dev` cannot start).
 onlyBuiltDependencies:
-  - better-sqlite3
+  - electron
   - esbuild
   - sharp
   - tesseract.js
+
+# Install scripts skipped on purpose. These native modules are only used inside
+# Electron, so the root `postinstall` rebuilds them against Electron's ABI
+# (`pnpm rebuild:native`). Building them for plain Node is wasted work and
+# breaks `pnpm install` on newer Node versions.
+ignoredBuiltDependencies:
+  - better-sqlite3
+  - ffi-napi
+  - lzma-native
+  - ref-napi

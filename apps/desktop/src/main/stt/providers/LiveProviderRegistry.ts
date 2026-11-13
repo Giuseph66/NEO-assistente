@@ -3,6 +3,7 @@ import type { LiveTranscriptionProvider } from './LiveTranscriptionProvider';
 import { VoskLiveProvider } from './VoskLiveProvider';
 import { OpenAIRealtimeTranscriptionProvider } from './OpenAIRealtimeTranscriptionProvider';
 import { GeminiLiveTranscriptionProvider } from './GeminiLiveTranscriptionProvider';
+import { CodexTranscriptionProvider } from './CodexTranscriptionProvider';
 
 export const normalizeLiveProviderId = (
   providerId: LiveTranscriptionProviderId
@@ -20,6 +21,8 @@ export const createLiveTranscriptionProvider = (
       return new OpenAIRealtimeTranscriptionProvider();
     case 'gemini_live':
       return new GeminiLiveTranscriptionProvider();
+    case 'codex_transcribe':
+      return new CodexTranscriptionProvider();
     case 'vox':
     default:
       return new VoskLiveProvider();

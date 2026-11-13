@@ -1,23 +1,34 @@
 {
   "name": "neo-assistente-pessoal",
   "private": true,
+  "packageManager": "pnpm@10.17.0",
+  "engines": {
+    "node": ">=20.11.0 <25",
+    "pnpm": ">=9"
+  },
   "scripts": {
-    "dev": "pnpm --filter @neo/engine build && pnpm --filter neo-desktop dev",
+    "postinstall": "pnpm --filter neo-desktop rebuild:electron && pnpm build:libs",
+    "dev": "pnpm build:libs && pnpm --filter neo-desktop dev",
+    "start": "pnpm dev",
     "preview": "pnpm --filter neo-desktop preview",
     "build": "pnpm -r build",
-    "lint": "pnpm -r lint",
-    "typecheck": "pnpm -r typecheck",
-    "setup": "./scripts/setup-containers.sh",
+    "build:libs": "pnpm -r --filter \"!neo-desktop\" build",
     "build:engine": "pnpm --filter @neo/engine build",
     "dev:engine": "pnpm --filter @neo/engine dev",
-    "postinstall": "pnpm --filter neo-desktop rebuild:electron"
+    "dist": "pnpm build:libs && pnpm --filter neo-desktop build:app",
+    "dist:deb": "pnpm build:libs && pnpm --filter neo-desktop build:deb",
+    "dist:appimage": "pnpm build:libs && pnpm --filter neo-desktop build:appimage",
+    "check": "node scripts/doctor.mjs",
+    "rebuild:native": "pnpm --filter neo-desktop rebuild:electron",
+    "clean": "node scripts/clean.mjs",
+    "reinstall": "node scripts/clean.mjs && pnpm install",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r --if-present test"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
     "electron-rebuild": "^3.2.9",
     "typescript": "^5.3.3"
-  },
-  "dependencies": {
-    "selfsigned": "^5.5.0"
   }
 }

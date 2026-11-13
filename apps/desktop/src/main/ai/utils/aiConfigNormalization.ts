@@ -1,10 +1,14 @@
 import { AIConfig, AIProviderId } from '@neo/shared';
 import { getModelsForProvider } from '../modelCatalog';
+import { OPENAI_DEFAULT_MODEL } from '../openaiModels';
 
 const FALLBACK_DEFAULT_MODEL: Partial<Record<AIProviderId, string>> = {
   gemini: 'gemini-2.5-flash',
-  openai: 'gpt-4o',
-  'openai-codex': 'GPT-5.3-Codex',
+  openai: OPENAI_DEFAULT_MODEL,
+  'openai-codex': OPENAI_DEFAULT_MODEL,
+  anthropic: 'claude-opus-5-5',
+  'claude-code': 'claude-opus-5-5',
+  'codex-cli': 'gpt-6.1-sol',
 };
 
 function getKnownModelIds(providerId: AIProviderId): string[] {
@@ -26,8 +30,11 @@ export function isModelKnownForProvider(
   modelName: string | null | undefined
 ): boolean {
   if (!modelName) return false;
-  const knownIds = getKnownModelIds(providerId);
-  return knownIds.includes(modelName);
+  // The Codex CLI's model list depends on the account and changes often (the UI reads it
+  // from the CLI), so any id is accepted instead of being reset to the first catalog entry.
+  if (providerId === 'codex-cli') return true;
+  const knownIds = getKnownModelIds(providerId).map((id) => id.toLowerCase());
+  return knownIds.includes(modelName.toLowerCase());
 }
 
 export function normalizeAIConfigPatch(

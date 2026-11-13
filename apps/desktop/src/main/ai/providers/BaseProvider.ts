@@ -37,7 +37,7 @@ export abstract class BaseVisionProvider implements VisionProvider {
    * Analisa uma imagem com retry e timeout
    */
   async analyzeImage(req: VisionRequest, apiKey: string): Promise<VisionResponse> {
-    const timeout = req.options?.timeoutMs || this.defaultTimeout;
+    const timeout = this.resolveTimeoutMs(req.options);
     const retries = req.options?.maxTokens ? 0 : this.defaultRetries; // Se tem maxTokens, assume que retries já foram feitos
 
     let lastError: Error | null = null;
@@ -79,7 +79,7 @@ export abstract class BaseVisionProvider implements VisionProvider {
    * Analisa texto com retry e timeout
    */
   async analyzeText(req: ChatRequest, apiKey: string): Promise<VisionResponse> {
-    const timeout = req.options?.timeoutMs || this.defaultTimeout;
+    const timeout = this.resolveTimeoutMs(req.options);
     const retries = req.options?.maxTokens ? 0 : this.defaultRetries;
 
     let lastError: Error | null = null;
@@ -116,9 +116,27 @@ export abstract class BaseVisionProvider implements VisionProvider {
   }
 
   /**
+   * Reasoning models think before answering and routinely exceed the generic
+   * request timeout. Providers raise the floor for those models.
+   */
+  protected minTimeoutMsFor(_modelName?: string): number {
+    return 0;
+  }
+
+  private resolveTimeoutMs(options?: ChatRequest['options']): number {
+    const requested = options?.timeoutMs || this.defaultTimeout;
+    return Math.max(requested, this.minTimeoutMsFor(options?.modelName));
+  }
+
+  /**
    * Verifica se um erro não deve ser retentado
    */
   protected isNonRetryableError(error: any): boolean {
+    // Providers flag errors that retrying cannot fix (login, quota, refusals).
+    if (error?.nonRetryable === true) {
+      return true;
+    }
+
     // Erros de autenticação (401, 403)
     if (error.statusCode === 401 || error.statusCode === 403) {
       return true;

@@ -3,6 +3,11 @@ import react from '@vitejs/plugin-react'
 import { execSync } from 'child_process'
 import { resolve } from 'path'
 
+// Terminals inside VS Code / Electron-based tools export ELECTRON_RUN_AS_NODE=1.
+// The Electron app spawned by `electron-vite dev` inherits it and boots as plain
+// Node (`electron.app` is undefined), so drop it before electron-vite launches.
+delete process.env.ELECTRON_RUN_AS_NODE
+
 // Plugin para compilar o worker após o build
 const buildWorkerPlugin = () => {
   return {
@@ -71,7 +76,13 @@ export default defineConfig({
             ]
         },
         optimizeDeps: {
-            include: ['react/jsx-runtime', 'react/jsx-dev-runtime'],
+            include: [
+                'react/jsx-runtime',
+                'react/jsx-dev-runtime',
+                // @xyflow/react is excluded, so its CJS-only transitive dep must be pre-bundled
+                // explicitly (pnpm hides it from the optimizer scan) or the renderer crashes.
+                '@xyflow/react > zustand > use-sync-external-store/shim/with-selector.js'
+            ],
             exclude: ['@xyflow/react']
         },
         build: {

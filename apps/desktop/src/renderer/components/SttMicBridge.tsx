@@ -72,7 +72,9 @@ export function SttMicBridge(): null {
       const config = await window.stt.getConfig().catch(() => null);
       const providerId = config?.provider;
       const targetRate =
-        providerId === 'openai_realtime_transcribe' || providerId === 'gemini_live'
+        providerId === 'openai_realtime_transcribe' ||
+        providerId === 'gemini_live' ||
+        providerId === 'codex_transcribe'
           ? DEFAULT_SAMPLE_RATE
           : config?.sampleRate && Number.isFinite(config.sampleRate) && config.sampleRate > 0
           ? config.sampleRate

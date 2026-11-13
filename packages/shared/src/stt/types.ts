@@ -4,7 +4,8 @@ export type LiveTranscriptionProviderId =
   | 'vox'
   | 'vosk'
   | 'openai_realtime_transcribe'
-  | 'gemini_live';
+  | 'gemini_live'
+  | 'codex_transcribe';
 
 export type ModelDescriptor = {
   id: string;

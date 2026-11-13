@@ -14,7 +14,7 @@ import {
   AnalyzeChatRequest,
   AnalyzeChatResponse,
   AIProviderId,
-} from '@ricky/shared';
+} from '@neo/shared';
 import { getLogger } from '@neo/logger';
 import { existsSync } from 'fs';
 import { getOAuthController } from '../auth/openaiOAuth';
@@ -50,6 +50,7 @@ export class AIService {
       enableImageOptimization: initialConfig?.enableImageOptimization ?? true,
       fallbackMaxAttempts: initialConfig?.fallbackMaxAttempts || 3,
       fallbackCooldownMinutes: initialConfig?.fallbackCooldownMinutes || 10,
+      reasoningEffort: initialConfig?.reasoningEffort || 'medium',
     };
 
     this.ensureProviderExists(this.config.providerId);
@@ -413,6 +414,7 @@ export class AIService {
           temperature: requestOptions?.temperature ?? 0.7,
           timeoutMs: this.config.timeoutMs,
           modelName: this.config.modelName,
+          reasoningEffort: this.config.reasoningEffort,
         };
         if (typeof resolvedMaxTokens === 'number') {
           options.maxTokens = resolvedMaxTokens;
@@ -472,7 +474,7 @@ export class AIService {
         }
 
         // Se é erro não retentável, para imediatamente
-        if (error.statusCode === 401 || error.statusCode === 403) {
+        if (error.statusCode === 401 || error.statusCode === 403 || error.nonRetryable === true) {
           throw error;
         }
 
@@ -541,6 +543,7 @@ export class AIService {
           temperature: requestOptions?.temperature ?? 0.7,
           timeoutMs: this.config.timeoutMs,
           modelName: this.config.modelName,
+          reasoningEffort: this.config.reasoningEffort,
         };
         if (typeof resolvedMaxTokens === 'number') {
           options.maxTokens = resolvedMaxTokens;
@@ -588,7 +591,7 @@ export class AIService {
           continue;
         }
 
-        if (error.statusCode === 401 || error.statusCode === 403) {
+        if (error.statusCode === 401 || error.statusCode === 403 || error.nonRetryable === true) {
           throw error;
         }
 
@@ -737,6 +740,7 @@ export class AIService {
       temperature: requestOptions?.temperature ?? 0.7,
       timeoutMs: this.config.timeoutMs,
       modelName: this.config.modelName,
+      reasoningEffort: this.config.reasoningEffort,
     };
     if (typeof resolvedMaxTokens === 'number') {
       options.maxTokens = resolvedMaxTokens;
@@ -789,6 +793,7 @@ export class AIService {
       temperature: requestOptions?.temperature ?? 0.7,
       timeoutMs: this.config.timeoutMs,
       modelName: this.config.modelName,
+      reasoningEffort: this.config.reasoningEffort,
     };
     if (typeof resolvedMaxTokens === 'number') {
       options.maxTokens = resolvedMaxTokens;
@@ -864,6 +869,33 @@ export class AIService {
           id: 'openai-codex',
           display_name: 'OpenAI (OAuth Codex)',
           base_url: 'https://chatgpt.com/backend-api/codex',
+        });
+        return;
+      }
+
+      if (providerId === 'anthropic') {
+        this.db.saveAIProvider({
+          id: 'anthropic',
+          display_name: 'Anthropic Claude (API Key)',
+          base_url: 'https://api.anthropic.com',
+        });
+        return;
+      }
+
+      if (providerId === 'claude-code') {
+        this.db.saveAIProvider({
+          id: 'claude-code',
+          display_name: 'Claude (assinatura via Claude Code)',
+          base_url: 'claude-code-cli',
+        });
+        return;
+      }
+
+      if (providerId === 'codex-cli') {
+        this.db.saveAIProvider({
+          id: 'codex-cli',
+          display_name: 'ChatGPT (assinatura via Codex CLI)',
+          base_url: 'codex-cli',
         });
       }
     } catch (error) {

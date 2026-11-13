@@ -2,13 +2,12 @@ import { EventEmitter } from 'events';
 import { Worker } from 'worker_threads';
 import { existsSync } from 'fs';
 import { join, parse } from 'path';
-import { mkdir, writeFile } from 'fs/promises';
 import { app } from 'electron';
 import { is } from '@electron-toolkit/utils';
 import { SubtitleSegment, TranscribeProgress } from '@neo/shared';
 import { getLogger } from '@neo/logger';
 import { segmentWords } from './SubtitleSegmenter';
-import { segmentsToSrt, segmentsToVtt } from './subtitleFormats';
+import { writeSubtitleFiles } from './subtitleFiles';
 
 const logger = getLogger();
 
@@ -60,24 +59,11 @@ export class FileTranscriber {
     );
 
     const segments = segmentWords(result.words);
-    const outputDir = join(app.getPath('userData'), 'subtitles');
-    await mkdir(outputDir, { recursive: true });
-
-    const baseName = parse(request.wavPath).name;
-    const exportFormat = request.exportFormat || 'both';
-
-    let vttPath: string | undefined;
-    let srtPath: string | undefined;
-
-    if (exportFormat === 'both' || exportFormat === 'vtt') {
-      vttPath = join(outputDir, `${baseName}.vtt`);
-      await writeFile(vttPath, segmentsToVtt(segments), 'utf8');
-    }
-
-    if (exportFormat === 'both' || exportFormat === 'srt') {
-      srtPath = join(outputDir, `${baseName}.srt`);
-      await writeFile(srtPath, segmentsToSrt(segments), 'utf8');
-    }
+    const { vttPath, srtPath } = await writeSubtitleFiles(
+      parse(request.wavPath).name,
+      segments,
+      request.exportFormat || 'both'
+    );
 
     return { segments, vttPath, srtPath };
   }

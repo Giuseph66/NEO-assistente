@@ -2,6 +2,9 @@ import { app } from 'electron';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { ModelInfo, AIProviderId } from '@neo/shared';
+import { ANTHROPIC_MODELS } from './anthropicModels';
+import { CODEX_CLI_MODELS } from './codexCliModels';
+import { OPENAI_CURRENT_MODELS } from './openaiModels';
 
 type ProviderCatalog = {
   models: Array<Omit<ModelInfo, 'provider'>>;
@@ -12,8 +15,14 @@ type ModelCatalog = {
   providers: Record<string, ProviderCatalog>;
 };
 
+/**
+ * Catalog version. When it is higher than the version of the catalog stored in userData,
+ * the seed replaces the stored lists (see mergeCatalog), so stale model ids do not linger.
+ */
+const CATALOG_VERSION = 3;
+
 const DEFAULT_CATALOG: ModelCatalog = {
-  version: 1,
+  version: CATALOG_VERSION,
   providers: {
     gemini: {
       models: [
@@ -139,89 +148,37 @@ const DEFAULT_CATALOG: ModelCatalog = {
       ],
     },
     openai: {
-      models: [
-        {
-          id: 'gpt-5.4',
-          name: 'GPT-5.4',
-          supportsVision: true,
-          maxTokens: 8192,
-          supportsStreaming: true,
-        },
-        {
-          id: 'gpt-5.4-mini',
-          name: 'GPT-5.4-Mini',
-          supportsVision: true,
-          maxTokens: 8192,
-          supportsStreaming: true,
-        },
-        {
-          id: 'gpt-5.3-codex',
-          name: 'GPT-5.3-Codex',
-          supportsVision: true,
-          maxTokens: 8192,
-          supportsStreaming: true,
-        },
-        {
-          id: 'gpt-5.2-codex',
-          name: 'GPT-5.2-Codex',
-          supportsVision: true,
-          maxTokens: 8192,
-          supportsStreaming: true,
-        },
-        {
-          id: 'gpt-4o',
-          name: 'GPT-4o',
-          supportsVision: true,
-          maxTokens: 4096,
-          supportsStreaming: true,
-        },
-      ],
+      models: OPENAI_CURRENT_MODELS,
     },
     'openai-codex': {
-      models: [
-        {
-          id: 'gpt-5.4',
-          name: 'GPT-5.4',
-          supportsVision: true,
-          maxTokens: 8192,
-          supportsStreaming: true,
-        },
-        {
-          id: 'gpt-5.4-mini',
-          name: 'GPT-5.4-Mini',
-          supportsVision: true,
-          maxTokens: 8192,
-          supportsStreaming: true,
-        },
-        {
-          id: 'gpt-5.3-codex',
-          name: 'GPT-5.3-Codex',
-          supportsVision: true,
-          maxTokens: 8192,
-          supportsStreaming: true,
-        },
-        {
-          id: 'gpt-5.2-codex',
-          name: 'GPT-5.2-Codex',
-          supportsVision: true,
-          maxTokens: 8192,
-          supportsStreaming: true,
-        },
-      ],
+      models: OPENAI_CURRENT_MODELS,
+    },
+    anthropic: {
+      models: ANTHROPIC_MODELS.map(({ provider: _provider, ...model }) => model),
+    },
+    'claude-code': {
+      models: ANTHROPIC_MODELS.map(({ provider: _provider, ...model }) => model),
+    },
+    'codex-cli': {
+      models: CODEX_CLI_MODELS.map(({ provider: _provider, ...model }) => model),
     },
   },
 };
 
-function mergeCatalog(seed: ModelCatalog, existing: ModelCatalog): { catalog: ModelCatalog; updated: boolean } {
+export function mergeCatalog(seed: ModelCatalog, existing: ModelCatalog): { catalog: ModelCatalog; updated: boolean } {
   let updated = false;
+  // A newer seed is authoritative: the stored catalog only ever *added* models, so lists
+  // written by older versions would otherwise keep retired ids (gpt-4o, GPT-5.x…) forever.
+  const seedIsNewer = (existing.version || 1) < (seed.version || 1);
   const merged: ModelCatalog = {
     version: Math.max(existing.version || 1, seed.version || 1),
     providers: { ...existing.providers },
   };
+  if (merged.version !== (existing.version || 1)) updated = true;
 
   Object.entries(seed.providers || {}).forEach(([providerId, seedProvider]) => {
     const existingProvider = merged.providers?.[providerId];
-    if (!existingProvider || !Array.isArray(existingProvider.models)) {
+    if (seedIsNewer || !existingProvider || !Array.isArray(existingProvider.models)) {
       merged.providers[providerId] = { models: [...seedProvider.models] };
       updated = true;
       return;
@@ -246,11 +203,21 @@ export function getModelCatalogPath(): string | null {
   return join(app.getPath('userData'), 'ai-models.json');
 }
 
-function normalizeModels(
+export function normalizeModels(
   providerId: AIProviderId,
   models: Array<Omit<ModelInfo, 'provider'>>
 ): ModelInfo[] {
-  return models.map((model) => ({
+  // Older catalogs stored ids like `GPT-5.4`; the APIs use lowercase ids. Keep one
+  // entry per id (case-insensitive), preferring the lowercase spelling.
+  const byId = new Map<string, Omit<ModelInfo, 'provider'>>();
+  for (const model of models) {
+    const key = model.id.toLowerCase();
+    const existing = byId.get(key);
+    if (!existing || (existing.id !== key && model.id === key)) {
+      byId.set(key, existing ? { ...existing, ...model } : model);
+    }
+  }
+  return Array.from(byId.values()).map((model) => ({
     ...model,
     provider: providerId,
   }));
@@ -268,7 +235,9 @@ export function loadModelCatalog(): ModelCatalog {
       const rawDefault = readFileSync(defaultCatalogPath, 'utf-8');
       const parsedDefault = JSON.parse(rawDefault);
       if (parsedDefault && typeof parsedDefault === 'object' && parsedDefault.providers) {
-        seedCatalog = parsedDefault as ModelCatalog;
+        // JSON seed entries come first (their order defines the default model);
+        // providers/models that exist only in DEFAULT_CATALOG are appended.
+        seedCatalog = mergeCatalog(DEFAULT_CATALOG, parsedDefault as ModelCatalog).catalog;
       }
     } catch {
       seedCatalog = DEFAULT_CATALOG;

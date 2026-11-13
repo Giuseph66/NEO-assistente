@@ -30,6 +30,8 @@ export class STTController {
   private audioTimer: NodeJS.Timeout | null = null;
   private level = 0;
   private lastLevelAt = 0;
+  /** Sample rate the running provider was started with (may differ from the stored config). */
+  private activeSampleRate = 16000;
 
   constructor(modelManager: ModelManager, db?: DatabaseManager) {
     this.modelManager = modelManager;
@@ -84,6 +86,12 @@ export class STTController {
       }
     } else if (providerId === 'gemini_live') {
       modelName = 'gemini-2.5-flash-native-audio-preview-12-2025';
+      if (storedConfig.sampleRate !== 16000) {
+        effectiveConfig = { ...storedConfig, sampleRate: 16000 };
+      }
+    } else if (providerId === 'codex_transcribe') {
+      // Uses the ChatGPT login (no API key); 16 kHz mono is plenty for speech and keeps clips small.
+      modelName = 'codex';
       if (storedConfig.sampleRate !== 16000) {
         effectiveConfig = { ...storedConfig, sampleRate: 16000 };
       }
@@ -147,6 +155,7 @@ export class STTController {
         this.provider?.pushAudio(chunk);
       });
       this.audioSource.onError((error) => this.handleError(error.message));
+      this.activeSampleRate = effectiveConfig.sampleRate;
       await this.audioSource.start({ sampleRate: effectiveConfig.sampleRate });
       if (this.audioSource instanceof ArecordAudioSource) {
         const deviceName = this.audioSource.getDeviceName();
@@ -244,7 +253,6 @@ export class STTController {
     );
     this.audioSource = newSource;
 
-    const config = this.getConfig();
     newSource.onData((chunk) => {
       this.audioBytes += chunk.length;
       this.lastAudioAt = Date.now();
@@ -252,7 +260,8 @@ export class STTController {
       this.provider?.pushAudio(chunk);
     });
     newSource.onError((error) => this.handleError(error.message));
-    await newSource.start({ sampleRate: config.sampleRate || 16000 });
+    // Must match the rate the provider was started with, not the stored config.
+    await newSource.start({ sampleRate: this.activeSampleRate });
 
     logger.info('STTController: audio source hot-swap complete');
   }

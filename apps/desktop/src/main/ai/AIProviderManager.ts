@@ -2,6 +2,9 @@ import { VisionProvider } from './providers/VisionProvider';
 import { GeminiProvider } from './providers/GeminiProvider';
 import { OpenAIProvider } from './providers/OpenAIProvider';
 import { OpenAICodexProvider } from './providers/OpenAICodexProvider';
+import { AnthropicProvider } from './providers/AnthropicProvider';
+import { ClaudeCodeProvider } from './providers/ClaudeCodeProvider';
+import { CodexCliProvider } from './providers/CodexCliProvider';
 import { AIProviderId } from '@neo/shared';
 import { getLogger } from '@neo/logger';
 
@@ -25,6 +28,9 @@ export class AIProviderManager {
     this.registerProvider(new GeminiProvider());
     this.registerProvider(new OpenAIProvider());
     this.registerProvider(new OpenAICodexProvider());
+    this.registerProvider(new AnthropicProvider());
+    this.registerProvider(new ClaudeCodeProvider());
+    this.registerProvider(new CodexCliProvider());
     logger.info('Registered default AI providers');
   }
 

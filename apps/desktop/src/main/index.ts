@@ -36,6 +36,8 @@ import { registerSessionIpc } from './ipc/sessionIpc'
 import { registerAutomationIpc } from './ipc/automationIpc'
 import { registerAutomationFlowIpc } from './ipc/automationFlowIpc'
 import { registerAuthIpc } from './ipc/authIpc'
+import { registerClaudeCodeIpc } from './ipc/claudeCodeIpc';
+import { registerCodexCliIpc } from './ipc/codexCliIpc';
 import { registerStorageIpc } from './ipc/storageIpc'
 import { registerPhoneMicIpc } from './ipc/phoneMicIpc'
 import { NotificationStore } from './notifications/notification-store'
@@ -587,6 +589,8 @@ app.whenReady().then(async () => {
 
     // Initialize Auth IPC (OAuth PKCE)
     registerAuthIpc();
+    registerClaudeCodeIpc();
+    registerCodexCliIpc();
 
     // Initialize Storage IPC
     registerStorageIpc();
@@ -604,6 +608,9 @@ app.whenReady().then(async () => {
         db.saveAIProvider({ id: 'gemini', display_name: 'Google Gemini', base_url: 'https://generativelanguage.googleapis.com' });
         db.saveAIProvider({ id: 'openai', display_name: 'OpenAI (API Key)', base_url: 'https://api.openai.com' });
         db.saveAIProvider({ id: 'openai-codex', display_name: 'OpenAI (OAuth Codex)', base_url: 'https://chatgpt.com/backend-api/codex' });
+        db.saveAIProvider({ id: 'anthropic', display_name: 'Anthropic Claude (API Key)', base_url: 'https://api.anthropic.com' });
+        db.saveAIProvider({ id: 'claude-code', display_name: 'Claude (assinatura via Claude Code)', base_url: 'claude-code-cli' });
+        db.saveAIProvider({ id: 'codex-cli', display_name: 'ChatGPT (assinatura via Codex CLI)', base_url: 'codex-cli' });
         logger.info('Default AI providers initialized');
     } catch (error) {
         logger.warn({ err: error }, 'Failed to initialize default AI providers (may already exist)');

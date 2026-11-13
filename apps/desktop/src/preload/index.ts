@@ -443,6 +443,14 @@ const authApi = {
     setActiveProfile: (profileId: string) => ipcRenderer.invoke('auth:set-active-profile', profileId),
     setProfileEnabled: (profileId: string, isEnabled: boolean) => ipcRenderer.invoke('auth:set-profile-enabled', profileId, isEnabled),
     getStatus: (profileId?: string) => ipcRenderer.invoke('auth:get-status', profileId),
+    // Claude.ai subscription through the Claude Code CLI (login happens in Claude Code)
+    claudeCodeStatus: () => ipcRenderer.invoke('claudeCode.status'),
+    claudeCodeLogin: () => ipcRenderer.invoke('claudeCode.login'),
+    claudeCodeLogout: () => ipcRenderer.invoke('claudeCode.logout'),
+    // ChatGPT subscription through the Codex CLI (login happens in Codex)
+    codexCliStatus: () => ipcRenderer.invoke('codexCli.status'),
+    codexCliLogin: () => ipcRenderer.invoke('codexCli.login'),
+    codexCliLogout: () => ipcRenderer.invoke('codexCli.logout'),
     getConfig: () => ipcRenderer.invoke('auth:get-config'),
     updateConfig: (patch: any) => ipcRenderer.invoke('auth:update-config', patch),
     onStatusChanged: (cb: (event: any) => void) => {

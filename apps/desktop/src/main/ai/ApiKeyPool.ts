@@ -3,6 +3,8 @@ import { KeyStorage } from './storage/KeyStorage';
 import { getLogger } from '@neo/logger';
 import { AIApiKey, AIProviderId } from '@neo/shared';
 import { getOAuthController } from '../auth/openaiOAuth';
+import { CLAUDE_CODE_VIRTUAL_KEY } from './claudeCode/ClaudeCodeCli';
+import { CODEX_CLI_VIRTUAL_KEY } from './codexCli/CodexCli';
 
 const logger = getLogger();
 
@@ -107,6 +109,36 @@ export class ApiKeyPool {
 
     if (providerId === 'openai-codex') {
       return null;
+    }
+
+    if (providerId === 'codex-cli') {
+      // Codex keeps its own login; the provider reports a missing login itself.
+      return {
+        id: -3,
+        providerId: 'codex-cli',
+        key: CODEX_CLI_VIRTUAL_KEY,
+        alias: 'Codex CLI (assinatura ChatGPT)',
+        last4: 'cli',
+        status: 'active',
+        successCount: 0,
+        failureCount: 0,
+        source: 'oauth',
+      };
+    }
+
+    if (providerId === 'claude-code') {
+      // Claude Code keeps its own login; the provider reports a missing login itself.
+      return {
+        id: -2,
+        providerId: 'claude-code',
+        key: CLAUDE_CODE_VIRTUAL_KEY,
+        alias: 'Claude Code (assinatura)',
+        last4: 'cli',
+        status: 'active',
+        successCount: 0,
+        failureCount: 0,
+        source: 'oauth',
+      };
     }
 
     // Fallback normal para chaves manuais (banco de dados)

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import './TextHighlightOutput.css';
-import { GeminiIcon, OpenAIIcon, OllamaIcon } from '../Icons';
+import { GeminiIcon, OpenAIIcon, OllamaIcon, ClaudeIcon } from '../Icons';
 
 type TextHighlightTranscription = {
   text: string;
@@ -59,7 +59,11 @@ export function TextHighlightOutput(): JSX.Element {
         return <GeminiIcon size={18} />;
       case 'openai':
       case 'openai-codex':
+      case 'codex-cli':
         return <OpenAIIcon size={18} />;
+      case 'anthropic':
+      case 'claude-code':
+        return <ClaudeIcon size={18} />;
       case 'ollama':
         return <OllamaIcon size={18} />;
       default:

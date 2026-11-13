@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useSttMicAnalyser } from '../../store/sttMicStore';
-import { ApiSection } from './SettingsSections/ApiSection';
+import type { LiveTranscriptionProviderId } from '@neo/shared';
+import { pickStoredModel } from '../../utils/modelOptions';
+import { ApiSection, ApiProviderTab, CODEX_LIVE_LABEL, OPENAI_REALTIME_LABEL } from './SettingsSections/ApiSection';
 import { AudioSection } from './SettingsSections/AudioSection';
 import { NotificationsSection } from './SettingsSections/NotificationsSection';
 import { FeaturesSection } from './SettingsSections/FeaturesSection';
@@ -30,60 +32,44 @@ type SettingsSection =
     | 'storage'
     | 'help';
 
-const OPENAI_ANALYSIS_LABEL_TO_ID: Record<string, string> = {
-    'GPT-5.2 Standard': 'gpt-5',
-    'GPT-5.2 Mini': 'gpt-5-mini',
-    'GPT-4.1 Standard': 'gpt-4.1',
-    'GPT-4o': 'gpt-4o',
-    'o1': 'o1',
-};
+const DEFAULT_MODEL_BY_TAB = {
+    openai: 'gpt-6.1-sol',
+    google: 'gemini-2.5-flash',
+    anthropic: 'claude-opus-5-5',
+} as const;
 
-const OPENAI_ANALYSIS_ID_TO_LABEL: Record<string, string> = {
-    'gpt-5': 'GPT-5.2 Standard',
-    'gpt-5-mini': 'GPT-5.2 Mini',
-    'gpt-4.1': 'GPT-4.1 Standard',
-    'gpt-4o': 'GPT-4o',
-    'o1': 'o1',
-};
-
-const GEMINI_ANALYSIS_LABEL_TO_ID: Record<string, string> = {
-    'Gemini 3 Pro': 'gemini-3-flash',
-    'Gemini 3 Flash': 'gemini-3-flash',
-    'Gemini 2.5 Pro': 'gemini-2.5-flash',
-    'Gemini 2.5 Flash': 'gemini-2.5-flash',
-    'Gemini 2.5 Flash-Lite': 'gemini-2.5-flash-lite',
-};
-
-function resolveAnalysisModelId(
-    provider: 'google' | 'openai' | 'local' | 'vosk',
-    labelOrId: string
-): string {
-    if (provider === 'openai') {
-        return OPENAI_ANALYSIS_LABEL_TO_ID[labelOrId] || labelOrId || 'gpt-5';
-    }
-    if (provider === 'google') {
-        return GEMINI_ANALYSIS_LABEL_TO_ID[labelOrId] || labelOrId || 'gemini-2.5-flash';
-    }
-    return labelOrId;
-}
-
-function resolveAnalysisModelLabel(
-    providerId: string | undefined,
-    modelId: string | undefined,
-    fallback: string
-): string {
-    if (!modelId) return fallback;
-    if (providerId === 'openai' || providerId === 'openai-codex') {
-        return OPENAI_ANALYSIS_ID_TO_LABEL[modelId] || modelId;
-    }
+function resolveAnalysisModelId(provider: ApiProviderTab, modelId: string): string {
+    if (provider === 'openai') return (modelId || DEFAULT_MODEL_BY_TAB.openai).toLowerCase();
+    if (provider === 'google') return modelId || DEFAULT_MODEL_BY_TAB.google;
+    if (provider === 'anthropic') return modelId || DEFAULT_MODEL_BY_TAB.anthropic;
     return modelId;
 }
+
+/** The dropdown works with real model ids; the label is derived from the id. */
+function resolveAnalysisModelLabel(_providerId: string | undefined, modelId: string | undefined, fallback: string): string {
+    return modelId || fallback;
+}
+
+/** Live transcription to activate for an AI provider (`null` = keep the current one). */
+function liveSttProviderFor(providerId: string): LiveTranscriptionProviderId | null {
+    if (providerId === 'gemini') return 'gemini_live';
+    if (providerId === 'openai') return 'openai_realtime_transcribe';
+    if (providerId === 'openai-codex') {
+        // ChatGPT login has no API key for the Realtime API; Codex transcription uses the login itself.
+        return localStorage.getItem('ricky:live-stt-provider') === 'openai_realtime_transcribe'
+            ? 'openai_realtime_transcribe'
+            : 'codex_transcribe';
+    }
+    // Claude has no transcription API: keep whatever transcription is configured.
+    return null;
+}
+
 
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
     const [activeSection, setActiveSection] = useState<SettingsSection>('api');
     const [performance, setPerformance] = useState('personalizado');
-    const [apiProvider, setApiProvider] = useState<'google' | 'openai' | 'local' | 'vosk'>('google');
+    const [apiProvider, setApiProvider] = useState<ApiProviderTab>('google');
     const [toast, setToast] = useState<string | null>(null);
 
     const [isSidebarMinimized, setIsSidebarMinimized] = useState(() => {
@@ -92,7 +78,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
 
     // Model selection states
     const [analysisModel, setAnalysisModel] = useState(() => {
-        return localStorage.getItem('ricky:analysis-model:google') || 'Gemini 3 Pro';
+        return pickStoredModel(localStorage.getItem('ricky:analysis-model:google'), DEFAULT_MODEL_BY_TAB.google);
     });
     const [liveModel, setLiveModel] = useState(() => {
         return localStorage.getItem('ricky:live-model:google') || 'Gemini Live';
@@ -101,6 +87,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     // API Key states
     const [geminiKey, setGeminiKey] = useState('');
     const [openaiKey, setOpenaiKey] = useState('');
+    const [anthropicKey, setAnthropicKey] = useState('');
     const [isKeyLoaded, setIsKeyLoaded] = useState(false);
     const [savedProvider, setSavedProvider] = useState<string | null>(null);
 
@@ -124,9 +111,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                 if (keys && Array.isArray(keys)) {
                     const gKey = keys.find((k: { providerId: string; last4: string }) => k.providerId === 'gemini');
                     const oKey = keys.find((k: { providerId: string; last4: string }) => k.providerId === 'openai');
+                    const aKey = keys.find((k: { providerId: string; last4: string }) => k.providerId === 'anthropic');
 
                     if (gKey) setGeminiKey(`•••• •••• •••• ${gKey.last4}`);
                     if (oKey) setOpenaiKey(`•••• •••• •••• ${oKey.last4}`);
+                    if (aKey) setAnthropicKey(`•••• •••• •••• ${aKey.last4}`);
                 }
 
                 // Fetch active config
@@ -137,14 +126,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                     setApiProvider(
                         config.providerId === 'gemini'
                             ? 'google'
-                            : (config.providerId === 'openai' || config.providerId === 'openai-codex')
+                            : (config.providerId === 'openai' || config.providerId === 'openai-codex' || config.providerId === 'codex-cli')
                                 ? 'openai'
-                                : 'local'
+                                : (config.providerId === 'anthropic' || config.providerId === 'claude-code')
+                                    ? 'anthropic'
+                                    : 'local'
                     );
                     const fallbackAnalysisLabel =
-                        (config.providerId === 'openai' || config.providerId === 'openai-codex')
-                            ? (localStorage.getItem('ricky:analysis-model:openai') || 'GPT-5.2 Standard')
-                            : (localStorage.getItem('ricky:analysis-model:google') || 'Gemini 3 Pro');
+                        (config.providerId === 'openai' || config.providerId === 'openai-codex' || config.providerId === 'codex-cli')
+                            ? (pickStoredModel(localStorage.getItem('ricky:analysis-model:openai'), DEFAULT_MODEL_BY_TAB.openai))
+                            : (config.providerId === 'anthropic' || config.providerId === 'claude-code')
+                                ? (pickStoredModel(localStorage.getItem('ricky:analysis-model:anthropic'), DEFAULT_MODEL_BY_TAB.anthropic))
+                                : (pickStoredModel(localStorage.getItem('ricky:analysis-model:google'), DEFAULT_MODEL_BY_TAB.google));
                     const resolvedLabel = resolveAnalysisModelLabel(config.providerId, config.modelName, fallbackAnalysisLabel);
                     setAnalysisModel(resolvedLabel);
                 }
@@ -155,11 +148,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                 try {
                     const sttConfig = await window.stt?.getConfig?.();
                     if (sttConfig?.provider) {
+                        // Also store the label: the tab-switch effect re-reads it from localStorage.
                         if (sttConfig.provider === 'openai_realtime_transcribe') {
-                            setLiveModel(
-                                localStorage.getItem('ricky:live-model:openai') ||
-                                'OpenAI Realtime Transcription (gpt-4o-transcribe)'
-                            );
+                            localStorage.setItem('ricky:live-model:openai', OPENAI_REALTIME_LABEL);
+                            setLiveModel(OPENAI_REALTIME_LABEL);
+                        } else if (sttConfig.provider === 'codex_transcribe') {
+                            localStorage.setItem('ricky:live-model:openai', CODEX_LIVE_LABEL);
+                            setLiveModel(CODEX_LIVE_LABEL);
                         } else if (sttConfig.provider === 'gemini_live') {
                             setLiveModel(
                                 localStorage.getItem('ricky:live-model:google') || 'Gemini Live'
@@ -169,12 +164,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
 
                     const isLocalSttEnabled = localStorage.getItem('ricky:use-local-stt') === 'true';
                     if (!isLocalSttEnabled && config?.providerId && window.stt?.updateConfig) {
-                        const desiredProvider =
-                            config.providerId === 'gemini'
-                                ? 'gemini_live'
-                                : (config.providerId === 'openai' || config.providerId === 'openai-codex')
-                                    ? 'openai_realtime_transcribe'
-                                    : null;
+                        const desiredProvider = liveSttProviderFor(config.providerId);
                         if (desiredProvider && desiredProvider !== sttConfig?.provider) {
                             await window.stt.updateConfig({ provider: desiredProvider });
                             localStorage.setItem('ricky:live-stt-provider', desiredProvider);
@@ -215,8 +205,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     }, []);
 
     const handleSaveKey = async () => {
-        const currentKey = apiProvider === 'google' ? geminiKey : openaiKey;
-        const providerId = apiProvider === 'google' ? 'gemini' : 'openai';
+        const currentKey =
+            apiProvider === 'google' ? geminiKey : apiProvider === 'anthropic' ? anthropicKey : openaiKey;
+        const providerId =
+            apiProvider === 'google' ? 'gemini' : apiProvider === 'anthropic' ? 'anthropic' : 'openai';
 
         try {
             // Se a chave não começar com os pontos, salva a nova chave
@@ -230,6 +222,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                 // Atualiza o estado com a versão mascarada após salvar
                 const last4 = currentKey.slice(-4);
                 if (apiProvider === 'google') setGeminiKey(`•••• •••• •••• ${last4}`);
+                else if (apiProvider === 'anthropic') setAnthropicKey(`•••• •••• •••• ${last4}`);
                 else setOpenaiKey(`•••• •••• •••• ${last4}`);
             }
 
@@ -242,12 +235,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
 
             const isLocalSttEnabled = localStorage.getItem('ricky:use-local-stt') === 'true';
             if (!isLocalSttEnabled && window.stt?.updateConfig) {
-                const sttProvider =
-                    providerId === 'gemini'
-                        ? 'gemini_live'
-                        : providerId === 'openai'
-                            ? 'openai_realtime_transcribe'
-                            : null;
+                const sttProvider = liveSttProviderFor(providerId);
                 if (sttProvider) {
                     await window.stt.updateConfig({ provider: sttProvider });
                     localStorage.setItem('ricky:live-stt-provider', sttProvider);
@@ -262,20 +250,46 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
     useEffect(() => {
         if (apiProvider === 'google') {
             setAnalysisModel(
-                localStorage.getItem('ricky:analysis-model:google') || 'Gemini 3 Pro'
+                pickStoredModel(localStorage.getItem('ricky:analysis-model:google'), DEFAULT_MODEL_BY_TAB.google)
             );
             setLiveModel(
                 localStorage.getItem('ricky:live-model:google') || 'Gemini Live'
             );
+        } else if (apiProvider === 'anthropic') {
+            setAnalysisModel(
+                pickStoredModel(localStorage.getItem('ricky:analysis-model:anthropic'), DEFAULT_MODEL_BY_TAB.anthropic)
+            );
         } else if (apiProvider === 'openai') {
             setAnalysisModel(
-                localStorage.getItem('ricky:analysis-model:openai') || 'GPT-5.2 Standard'
+                pickStoredModel(localStorage.getItem('ricky:analysis-model:openai'), DEFAULT_MODEL_BY_TAB.openai)
             );
             setLiveModel(
                 localStorage.getItem('ricky:live-model:openai') ||
                 'OpenAI Realtime Transcription (gpt-4o-transcribe)'
             );
         }
+
+        // The saved config is the source of truth for the tab that holds the active provider:
+        // without this the tab switch shows a stale default label instead of the real model.
+        let cancelled = false;
+        const tabProviders: Record<string, string[]> = {
+            google: ['gemini'],
+            openai: ['openai', 'openai-codex', 'codex-cli'],
+            anthropic: ['anthropic', 'claude-code'],
+        };
+        void (async () => {
+            try {
+                const config = await (globalThis as any).ai?.getConfig?.();
+                if (cancelled || !config?.providerId || !config?.modelName) return;
+                if (!tabProviders[apiProvider]?.includes(config.providerId)) return;
+                setAnalysisModel(resolveAnalysisModelLabel(config.providerId, config.modelName, config.modelName));
+            } catch {
+                // keep the fallback label
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
     }, [apiProvider]);
 
     useEffect(() => {
@@ -397,8 +411,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
                         savedProvider={savedProvider}
                         geminiKey={geminiKey}
                         openaiKey={openaiKey}
+                        anthropicKey={anthropicKey}
                         setGeminiKey={setGeminiKey}
                         setOpenaiKey={setOpenaiKey}
+                        setAnthropicKey={setAnthropicKey}
                         handleSaveKey={handleSaveKey}
                         setSavedProvider={setSavedProvider}
                         performance={performance}

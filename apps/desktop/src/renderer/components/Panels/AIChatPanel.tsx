@@ -6,7 +6,7 @@ import {
   STTFinalEvent,
   SystemAudioSourceInfo,
 } from '@neo/shared';
-import { GeminiIcon, OpenAIIcon, OllamaIcon, ProviderIcon } from '../Icons';
+import { GeminiIcon, OpenAIIcon, OllamaIcon, ProviderIcon, ClaudeIcon } from '../Icons';
 import { useSharedInputValue } from '../../store/sharedInputStore';
 
 interface Message {
@@ -200,6 +200,7 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
         return <GeminiIcon size={18} />;
       case 'openai':
       case 'openai-codex':
+      case 'codex-cli':
         return (
           <ProviderIcon size={18} viewBox="0 0 24 24">
             <defs>
@@ -214,6 +215,9 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
             />
           </ProviderIcon>
         );
+      case 'anthropic':
+      case 'claude-code':
+        return <ClaudeIcon size={18} />;
       case 'ollama':
       case 'local':
         return <OllamaIcon size={18} />;

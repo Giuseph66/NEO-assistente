@@ -115,6 +115,21 @@ type VirtualDeviceStatus = {
   error: string | null;
 };
 
+type CodexCliAuthStatus = {
+  installed: boolean;
+  loggedIn: boolean;
+  authMethod?: string;
+  error?: string;
+};
+
+type ClaudeCodeAuthStatus = {
+  installed: boolean;
+  loggedIn: boolean;
+  authMethod?: string;
+  subscriptionType?: string;
+  error?: string;
+};
+
 declare global {
   interface Window {
     stt: {
@@ -331,6 +346,12 @@ declare global {
       };
     };
     auth: {
+      claudeCodeStatus: () => Promise<ClaudeCodeAuthStatus>;
+      claudeCodeLogin: () => Promise<ClaudeCodeAuthStatus>;
+      claudeCodeLogout: () => Promise<ClaudeCodeAuthStatus>;
+      codexCliStatus: () => Promise<CodexCliAuthStatus>;
+      codexCliLogin: () => Promise<CodexCliAuthStatus>;
+      codexCliLogout: () => Promise<CodexCliAuthStatus>;
       loginOpenAI: (profileId?: string, label?: string) => Promise<{ success: boolean; error?: string; authorizeUrl?: string }>;
       finishLoginManual: (profileId: string, codeOrUrl: string, label?: string) => Promise<{ success: boolean; error?: string }>;
       cancelLogin: (profileId: string) => Promise<{ success: boolean }>;

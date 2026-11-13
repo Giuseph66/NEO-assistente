@@ -78,6 +78,12 @@ export class SystemSttController {
       if (storedConfig.sampleRate !== 16000) {
         effectiveConfig = { ...storedConfig, sampleRate: 16000 };
       }
+    } else if (providerId === 'codex_transcribe') {
+      // Uses the ChatGPT login (no API key); 16 kHz mono is plenty for speech and keeps clips small.
+      modelName = 'codex';
+      if (storedConfig.sampleRate !== 16000) {
+        effectiveConfig = { ...storedConfig, sampleRate: 16000 };
+      }
     }
 
     this.setStatus({ state: 'starting', providerId });
