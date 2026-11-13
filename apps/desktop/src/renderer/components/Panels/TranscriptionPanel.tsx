@@ -21,6 +21,25 @@ import { SubtitleEditor } from '../../TranscriptionTab/SubtitleEditor';
 
 const defaultStatus: STTStatus = { state: 'idle' };
 
+type TimelineSource = 'mic' | 'system';
+type TimelineEntry = { id: string; source: TimelineSource; text: string; ts: number };
+
+const TIMELINE_LIMIT = 300;
+const SOURCE_LABEL: Record<TimelineSource, string> = { mic: 'Você', system: 'Sistema' };
+
+const isActiveState = (status: STTStatus) =>
+  status.state === 'running' || status.state === 'listening' || status.state === 'starting';
+
+/** Drops recognizer tokens (<unk>, <noise>) and the "…" placeholder clip-based providers use. */
+const cleanCaption = (text: string | undefined): string =>
+  (text || '')
+    .replace(/<(unk|noise|silence)>/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const formatClock = (ts: number) =>
+  new Date(ts).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
 export function TranscriptionPanel(): JSX.Element {
   const [sttStatus, setSttStatus] = useState<STTStatus>(defaultStatus);
   const [isRecording, setIsRecording] = useState(false);
@@ -42,6 +61,12 @@ export function TranscriptionPanel(): JSX.Element {
   const [systemSttLevel, setSystemSttLevel] = useState(0);
   const [systemRecordingLevel, setSystemRecordingLevel] = useState(0);
   const [systemError, setSystemError] = useState<string | null>(null);
+  const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
+  const [micLivePartial, setMicLivePartial] = useState('');
+  const [dualBusy, setDualBusy] = useState(false);
+  const [timelineCopied, setTimelineCopied] = useState(false);
+  const timelineEndRef = useRef<HTMLDivElement | null>(null);
+  const timelineSeqRef = useRef(0);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
   const [recordings, setRecordings] = useState<RecordingEntry[]>([]);
   const [recordingsLoading, setRecordingsLoading] = useState(false);
@@ -73,6 +98,24 @@ export function TranscriptionPanel(): JSX.Element {
     if (!getFeaturePermission('microphone')) {
       throw new Error('Permissão do microfone está negada no app');
     }
+  };
+
+  const appendTimeline = (source: TimelineSource, event: STTFinalEvent) => {
+    const text = cleanCaption(event.text);
+    if (!text || text === '…') return;
+    timelineSeqRef.current += 1;
+    const entry: TimelineEntry = {
+      id: `${source}-${event.ts}-${timelineSeqRef.current}`,
+      source,
+      text,
+      ts: event.ts || Date.now(),
+    };
+    setTimeline((prev) => {
+      const next = [...prev, entry];
+      // Both streams arrive independently; keep speaking order by timestamp.
+      next.sort((a, b) => a.ts - b.ts);
+      return next.length > TIMELINE_LIMIT ? next.slice(next.length - TIMELINE_LIMIT) : next;
+    });
   };
 
   const loadSystemSources = async () => {
@@ -128,8 +171,20 @@ export function TranscriptionPanel(): JSX.Element {
 
   useEffect(() => {
     window.stt.getStatus().then((status) => setSttStatus(status || defaultStatus));
-    const offStatus = window.stt.onStatus((status) => setSttStatus(status));
-    return () => offStatus();
+    const offStatus = window.stt.onStatus((status) => {
+      setSttStatus(status);
+      if (!isActiveState(status)) setMicLivePartial('');
+    });
+    const offPartial = window.stt.onPartial((event) => setMicLivePartial(cleanCaption(event.text)));
+    const offFinal = window.stt.onFinal((event) => {
+      setMicLivePartial('');
+      appendTimeline('mic', event);
+    });
+    return () => {
+      offStatus();
+      offPartial();
+      offFinal();
+    };
   }, []);
 
   useEffect(() => {
@@ -178,9 +233,10 @@ export function TranscriptionPanel(): JSX.Element {
       }
     });
     const offPartial = window.systemStt.onPartial((event) => setSystemPartial(event));
-    const offFinal = window.systemStt.onFinal((event) =>
-      setSystemFinals((prev) => [event, ...prev].slice(0, 20))
-    );
+    const offFinal = window.systemStt.onFinal((event) => {
+      setSystemFinals((prev) => [event, ...prev].slice(0, 20));
+      appendTimeline('system', event);
+    });
     const offError = window.systemStt.onError((payload) => setSystemError(payload.message));
     const offLevel = window.systemStt.onLevel((payload) => setSystemSttLevel(payload.level));
     return () => {
@@ -409,6 +465,57 @@ export function TranscriptionPanel(): JSX.Element {
     }
   };
 
+  /** Mic and system audio are transcribed by two independent pipelines running side by side. */
+  const toggleDualStt = async () => {
+    if (!window.stt || !window.systemStt || dualBusy) return;
+    const micActive = isActiveState(sttStatus);
+    const systemActive = isActiveState(systemStatus);
+    setDualBusy(true);
+    setSystemError(null);
+    try {
+      if (micActive && systemActive) {
+        await Promise.allSettled([window.stt.stop(), window.systemStt.stop()]);
+        return;
+      }
+      const resolvedSourceId = systemActive ? selectedSourceId : selectedSourceId || (await detectDefaultSource());
+      if (!systemActive && !resolvedSourceId) {
+        setSystemError('Selecione um dispositivo de audio do sistema');
+      }
+      const results = await Promise.allSettled([
+        micActive ? Promise.resolve() : window.stt.start(),
+        systemActive || !resolvedSourceId
+          ? Promise.resolve()
+          : window.systemStt.start({ sourceId: resolvedSourceId }),
+      ]);
+      const failures = results
+        .map((result, index) =>
+          result.status === 'rejected'
+            ? `${index === 0 ? 'Microfone' : 'Sistema'}: ${
+                result.reason instanceof Error ? result.reason.message : String(result.reason)
+              }`
+            : null
+        )
+        .filter(Boolean);
+      if (failures.length) setSystemError(failures.join(' | '));
+    } finally {
+      setDualBusy(false);
+    }
+  };
+
+  const copyTimeline = async () => {
+    const text = timeline
+      .map((entry) => `[${formatClock(entry.ts)}] ${SOURCE_LABEL[entry.source]}: ${entry.text}`)
+      .join('\n');
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setTimelineCopied(true);
+      setTimeout(() => setTimelineCopied(false), 1200);
+    } catch {
+      setSystemError('Falha ao copiar a conversa');
+    }
+  };
+
   const handleDeleteRecording = async (recording: RecordingEntry) => {
     if (!window.recorder) return;
     await window.recorder.delete(recording.path);
@@ -468,11 +575,18 @@ export function TranscriptionPanel(): JSX.Element {
     systemStatus.state === 'running' ||
     systemStatus.state === 'listening' ||
     systemStatus.state === 'starting';
-  const systemLevel = isSystemSttRunning
-    ? systemSttLevel
-    : isSystemRecording
-      ? systemRecordingLevel
-      : 0;
+  // Recording and STT share one capture, so either level reflects the same audio.
+  const systemLevel = Math.max(
+    isSystemSttRunning ? systemSttLevel : 0,
+    isSystemRecording ? systemRecordingLevel : 0
+  );
+  const isDualRunning = isSttRunning && isSystemSttRunning;
+  const systemLivePartial = cleanCaption(systemPartial?.text);
+  const showTimeline = timeline.length > 0 || isSttRunning || isSystemSttRunning;
+
+  useEffect(() => {
+    timelineEndRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [timeline.length]);
   const handleCopyDebug = async () => {
     const text = debugEvents.join('\n');
     if (!text) return;
@@ -514,6 +628,15 @@ export function TranscriptionPanel(): JSX.Element {
           <h3>Transcricao</h3>
           <StatusBadge status={sttStatus} />
         </div>
+        <button
+          type="button"
+          className={`transcribe-button ${isDualRunning ? 'active' : ''}`}
+          onClick={toggleDualStt}
+          disabled={dualBusy}
+          title="Transcreve microfone e audio do sistema ao mesmo tempo, em fluxos separados"
+        >
+          {dualBusy ? 'Aguarde...' : isDualRunning ? 'Parar mic + sistema' : 'Transcrever mic + sistema'}
+        </button>
       </div>
       <div className="transcription-content">
         <div className="transcription-columns">
@@ -549,9 +672,11 @@ export function TranscriptionPanel(): JSX.Element {
                     <span className="record-dot" />
                     <span className="record-pulse" />
                   </span>
-                  {isSystemRecording
-                    ? 'Gravando audio do sistema...'
-                    : 'Transcrevendo audio do sistema...'}
+                  {isSystemRecording && isSystemSttRunning
+                    ? 'Gravando e transcrevendo audio do sistema...'
+                    : isSystemRecording
+                      ? 'Gravando audio do sistema...'
+                      : 'Transcrevendo audio do sistema...'}
                 </div>
               </div>
             )}
@@ -637,6 +762,67 @@ export function TranscriptionPanel(): JSX.Element {
             </div>
           </div>
         </div>
+        {showTimeline && (
+          <div className="conversation-block">
+            <div className="conversation-header">
+              <div>
+                <div className="section-title">Conversa</div>
+                <div className="section-subtitle">
+                  Voce (microfone) e Sistema (audio do computador), em ordem de fala
+                </div>
+              </div>
+              <div className="conversation-actions">
+                <button
+                  type="button"
+                  className="transcribe-button secondary"
+                  onClick={copyTimeline}
+                  disabled={timeline.length === 0}
+                >
+                  {timelineCopied ? 'Copiado' : 'Copiar'}
+                </button>
+                <button
+                  type="button"
+                  className="transcribe-button secondary"
+                  onClick={() => setTimeline([])}
+                  disabled={timeline.length === 0}
+                >
+                  Limpar
+                </button>
+              </div>
+            </div>
+            <div className="conversation-list">
+              {timeline.length === 0 && (
+                <div className="conversation-empty">Aguardando fala...</div>
+              )}
+              {timeline.map((entry) => (
+                <div key={entry.id} className={`conversation-line source-${entry.source}`}>
+                  <span className="conversation-speaker">{SOURCE_LABEL[entry.source]}</span>
+                  <span className="conversation-time">{formatClock(entry.ts)}</span>
+                  <span className="conversation-text">{entry.text}</span>
+                </div>
+              ))}
+              {isSttRunning && micLivePartial && (
+                <div className="conversation-line source-mic live">
+                  <span className="conversation-speaker">Você</span>
+                  <span className="conversation-time">ao vivo</span>
+                  <span className="conversation-text">
+                    {micLivePartial === '…' ? 'transcrevendo…' : micLivePartial}
+                  </span>
+                </div>
+              )}
+              {isSystemSttRunning && systemLivePartial && (
+                <div className="conversation-line source-system live">
+                  <span className="conversation-speaker">Sistema</span>
+                  <span className="conversation-time">ao vivo</span>
+                  <span className="conversation-text">
+                    {systemLivePartial === '…' ? 'transcrevendo…' : systemLivePartial}
+                  </span>
+                </div>
+              )}
+              <div ref={timelineEndRef} />
+            </div>
+          </div>
+        )}
         {subtitleState && (
           <SubtitleEditor
             wavPath={subtitleState.wavPath}

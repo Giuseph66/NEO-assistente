@@ -614,3 +614,9 @@
     color: #666;
     font-size: 12px;
 }
+
+/* Failure notice: shown in place of the placeholder for a few seconds */
+.hud-input.has-notice::placeholder {
+    color: #fca5a5;
+    opacity: 1;
+}

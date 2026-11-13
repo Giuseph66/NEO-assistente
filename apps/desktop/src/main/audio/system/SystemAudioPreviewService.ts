@@ -1,12 +1,13 @@
 import { EventEmitter } from 'events';
 import { BrowserWindow } from 'electron';
 import { getLogger } from '@neo/logger';
-import { SystemAudioCapture } from './SystemAudioCapture';
+import type { SystemAudioCaptureLike } from './SystemAudioCapture';
+import { getSystemAudioHub } from './SystemAudioHub';
 
 const logger = getLogger();
 
 export class SystemAudioPreviewService {
-    private capture: SystemAudioCapture | null = null;
+    private capture: SystemAudioCaptureLike | null = null;
     private emitter = new EventEmitter();
     private level = 0;
     private lastLevelAt = 0;
@@ -17,7 +18,7 @@ export class SystemAudioPreviewService {
             await this.stop();
         }
 
-        this.capture = new SystemAudioCapture();
+        this.capture = getSystemAudioHub().createCapture();
         this.level = 0;
         this.lastLevelAt = 0;
 

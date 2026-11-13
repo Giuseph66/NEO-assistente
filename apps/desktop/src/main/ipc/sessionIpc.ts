@@ -68,7 +68,8 @@ export function registerSessionIpc(db: DatabaseManager): void {
                 createdAt: s.createdAt,
                 modelName: s.modelName,
                 providerId: s.providerId,
-                screenshotId: s.screenshotId
+                screenshotId: s.screenshotId,
+                title: s.title || null
             }));
         } catch (error) {
             console.error('[Session] Failed to list sessions:', error);
@@ -90,7 +91,10 @@ export function registerSessionIpc(db: DatabaseManager): void {
                     role: m.role,
                     content: m.content,
                     recognizedText: m.recognized_text,
-                    createdAt: m.created_at
+                    createdAt: m.created_at,
+                    providerId: m.provider_id,
+                    modelName: m.model_name,
+                    durationMs: m.duration_ms
                 }))
             };
         } catch (error) {
@@ -110,6 +114,19 @@ export function registerSessionIpc(db: DatabaseManager): void {
         } catch (error) {
             console.error('[Session] Failed to create session:', error);
             throw error;
+        }
+    });
+
+    ipcMain.handle('session:rename', async (_event, { sessionId, title }: { sessionId: number; title: string }) => {
+        try {
+            const clean = String(title ?? '').replace(/\s+/g, ' ').trim().slice(0, 120);
+            db.updateAISessionTitle(sessionId, clean || null);
+            const saved = db.getAISessionById(sessionId)?.title ?? null;
+            broadcast('session:updated', { sessionId, title: saved });
+            return { success: true, title: saved };
+        } catch (error) {
+            console.error('[Session] Failed to rename session:', error);
+            return { success: false, error: (error as Error).message };
         }
     });
 

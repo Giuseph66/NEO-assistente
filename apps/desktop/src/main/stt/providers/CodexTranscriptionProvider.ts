@@ -21,6 +21,11 @@ const logger = getLogger();
 const STOP_DRAIN_TIMEOUT_MS = 20_000;
 /** Shown while an utterance is being transcribed (the endpoint has no partial results). */
 const PENDING_PARTIAL_TEXT = '…';
+/**
+ * Clips transcribed at the same time. Finals are still emitted in speaking order;
+ * overlap only stops a slow request from delaying every clip behind it.
+ */
+const MAX_PARALLEL_REQUESTS = 2;
 
 export type CodexProviderDeps = {
   client?: CodexTranscriptionClient;
@@ -43,6 +48,13 @@ export class CodexTranscriptionProvider implements LiveTranscriptionProvider {
   private inFlight = 0;
   private abort: AbortController | null = null;
   private failed = false;
+  private running = 0;
+  private waiting: Array<() => void> = [];
+  /** Bumped on start(): slots held by clips of a previous run are not counted again. */
+  private generation = 0;
+  /** Requests run one at a time until one succeeds, so a bad login fails exactly once. */
+  private verified = false;
+  private fatalReported = false;
 
   constructor(deps: CodexProviderDeps = {}) {
     this.client = deps.client ?? new CodexTranscriptionClient({ getCredentials: getCodexCredentials });
@@ -65,9 +77,21 @@ export class CodexTranscriptionProvider implements LiveTranscriptionProvider {
     this.failed = false;
     this.abort = new AbortController();
     this.queue = Promise.resolve();
+    this.generation += 1;
+    this.running = 0;
+    // Clips of a previous run still waiting for a slot run with their (aborted) signal.
+    const stale = this.waiting;
+    this.waiting = [];
+    stale.forEach((resume) => resume());
+    this.verified = false;
+    this.fatalReported = false;
+    const configuredMaxMs = Math.min(Math.max(config.maxSegmentSeconds || 15, 5), 30) * 1000;
+    const profile = config.segmentation ?? {};
     this.segmenter = new SpeechSegmenter({
       sampleRate: config.sampleRate,
-      maxSegmentMs: Math.min(Math.max(config.maxSegmentSeconds || 15, 5), 30) * 1000,
+      maxSegmentMs: profile.maxSegmentMs ? Math.min(profile.maxSegmentMs, configuredMaxMs) : configuredMaxMs,
+      silenceMs: profile.silenceMs,
+      minSpeechMs: profile.minSpeechMs,
     });
     this.emitStatus({ state: 'listening', providerId: this.id, modelId: 'codex' });
   }
@@ -128,30 +152,54 @@ export class CodexTranscriptionProvider implements LiveTranscriptionProvider {
     return () => this.emitter.off('debug', cb);
   }
 
-  /** Clips are transcribed one at a time so finals keep the speaking order. */
+  /**
+   * Requests start as soon as a slot is free (up to MAX_PARALLEL_REQUESTS); results
+   * are chained so finals keep the speaking order.
+   */
   private enqueue(segment: SpeechSegment): void {
     const config = this.config;
     if (!config) return;
     const signal = this.abort?.signal;
     this.inFlight += 1;
     this.emitPartial(PENDING_PARTIAL_TEXT);
-    this.queue = this.queue.then(async () => {
+    const startedAt = Date.now();
+    // Wall-clock time the utterance began (the segment just closed, live): finals carry
+    // speaking time, not response time, so mic and system transcripts interleave correctly.
+    const spokenAt = startedAt - Math.round(segment.endMs - segment.startMs);
+    const result: Promise<{ text: string } | { error: unknown }> = this.withSlot(async () => {
+      if (this.failed) return '';
       try {
-        if (this.failed) return;
-        const startedAt = Date.now();
-        const text = await this.client.transcribe({
+        return await this.client.transcribe({
           audio: encodeWavPcm16(segment.pcm, config.sampleRate),
           filename: 'utterance.wav',
           mimeType: 'audio/wav',
           language: toIsoLanguage(this.languageHint(config)),
           signal,
         });
-        this.emitDebug(
-          `codex:segment ${Math.round(segment.endMs - segment.startMs)}ms -> ${text.length} chars in ${Date.now() - startedAt}ms`
-        );
-        if (text) this.emitFinal(text);
       } catch (error) {
-        this.handleClipError(error);
+        // Flag it before the slot is handed to the next clip, so that clip is not sent.
+        if (error instanceof CodexTranscriptionError && error.fatal) this.failed = true;
+        throw error;
+      }
+    }).then(
+      (text) => {
+        this.markVerified();
+        return { text };
+      },
+      (error: unknown) => ({ error })
+    );
+    this.queue = this.queue.then(async () => {
+      try {
+        const outcome = await result;
+        if ('error' in outcome) {
+          this.handleClipError(outcome.error);
+          return;
+        }
+        if (this.failed) return;
+        this.emitDebug(
+          `codex:segment ${Math.round(segment.endMs - segment.startMs)}ms -> ${outcome.text.length} chars in ${Date.now() - startedAt}ms`
+        );
+        if (outcome.text) this.emitFinal(outcome.text, spokenAt);
       } finally {
         this.inFlight -= 1;
         if (this.inFlight === 0) this.emitPartial('');
@@ -159,10 +207,44 @@ export class CodexTranscriptionProvider implements LiveTranscriptionProvider {
     });
   }
 
+  private async withSlot<T>(task: () => Promise<T>): Promise<T> {
+    const generation = this.generation;
+    if (this.running >= this.parallelLimit()) {
+      // The finishing task hands its slot over directly (running stays the same).
+      await new Promise<void>((resolve) => this.waiting.push(resolve));
+    } else {
+      this.running += 1;
+    }
+    try {
+      return await task();
+    } finally {
+      if (generation === this.generation) {
+        const next = this.waiting.shift();
+        if (next) next();
+        else this.running -= 1;
+      }
+    }
+  }
+
+  private parallelLimit(): number {
+    return this.verified ? MAX_PARALLEL_REQUESTS : 1;
+  }
+
+  private markVerified(): void {
+    if (this.verified) return;
+    this.verified = true;
+    while (this.running < MAX_PARALLEL_REQUESTS && this.waiting.length > 0) {
+      this.running += 1;
+      this.waiting.shift()!();
+    }
+  }
+
   private handleClipError(error: unknown): void {
     if (error instanceof CodexTranscriptionError) {
       if (error.code === 'aborted') return;
       if (error.fatal) {
+        if (this.fatalReported) return;
+        this.fatalReported = true;
         this.failed = true;
         this.emitError({ message: error.message, code: error.code, providerId: this.id });
         return;
@@ -186,8 +268,8 @@ export class CodexTranscriptionProvider implements LiveTranscriptionProvider {
     this.emitter.emit('partial', { text, ts: Date.now(), meta: { providerId: this.id } } satisfies STTPartialEvent);
   }
 
-  private emitFinal(text: string): void {
-    this.emitter.emit('final', { text, ts: Date.now(), meta: { providerId: this.id } } satisfies STTFinalEvent);
+  private emitFinal(text: string, ts = Date.now()): void {
+    this.emitter.emit('final', { text, ts, meta: { providerId: this.id } } satisfies STTFinalEvent);
   }
 
   private emitStatus(status: STTStatus): void {

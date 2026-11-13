@@ -2,10 +2,13 @@ import { open } from 'fs/promises';
 import { dirname } from 'path';
 import { mkdir } from 'fs/promises';
 
+const HEADER_BYTES = 44;
+
 export class WavWriter {
   private filePath: string;
   private fileHandle: Awaited<ReturnType<typeof open>> | null = null;
   private dataBytes = 0;
+  private pendingWrites = new Set<Promise<unknown>>();
   private sampleRate: number;
   private channels: number;
 
@@ -26,12 +29,23 @@ export class WavWriter {
     if (!this.fileHandle) {
       throw new Error('WavWriter not initialized');
     }
-    await this.fileHandle.write(chunk);
+    // Explicit positions: the header write at offset 0 does not move the file cursor,
+    // so a plain append would overwrite the header. Positions are reserved
+    // synchronously, so un-awaited concurrent writes still land in order.
+    const position = HEADER_BYTES + this.dataBytes;
     this.dataBytes += chunk.length;
+    const pending = this.fileHandle.write(chunk, 0, chunk.length, position);
+    this.pendingWrites.add(pending);
+    try {
+      await pending;
+    } finally {
+      this.pendingWrites.delete(pending);
+    }
   }
 
   async finalize(): Promise<void> {
     if (!this.fileHandle) return;
+    await Promise.allSettled([...this.pendingWrites]);
     const header = this.buildHeader(this.dataBytes);
     await this.fileHandle.write(header, 0, header.length, 0);
     await this.fileHandle.close();

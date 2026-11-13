@@ -15,6 +15,7 @@ interface Session {
     createdAt: number;
     modelName: string;
     providerId: string;
+    title?: string | null;
 }
 
 interface HUDDropdownProps {
@@ -183,8 +184,8 @@ export const HUDDropdown: React.FC<HUDDropdownProps> = ({
                                     onClick={() => handleSessionClick(session.id)}
                                 >
                                     <div className="item-info">
-                                        <span className="item-name">#{session.id}</span>
-                                        <span className="item-model">{session.modelName}</span>
+                                        <span className="item-name">{session.title || `Conversa #${session.id}`}</span>
+                                        <span className="item-model">#{session.id}</span>
                                     </div>
                                     <span className="item-time">
                                         {formatTime(session.createdAt)}

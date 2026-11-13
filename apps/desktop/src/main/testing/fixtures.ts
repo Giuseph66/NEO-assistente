@@ -21,3 +21,19 @@ export function fakeChatGptJwt(accountId = 'acct-123', extra: Record<string, unk
     'signature',
   ].join('.');
 }
+
+/**
+ * Speech-like audio with no real pause: words of `syllables` 200 ms loud bursts
+ * separated by 60 ms soft dips, and `gapMs` very quiet gaps between words.
+ * Word length = syllables * 260 ms.
+ */
+export function continuousSpeech(words: number, syllables = 10, gapMs = 120, sampleRate = 16000): Buffer {
+  const parts: Buffer[] = [];
+  for (let w = 0; w < words; w += 1) {
+    for (let s = 0; s < syllables; s += 1) {
+      parts.push(tone(200, sampleRate, 6000), tone(60, sampleRate, 1500));
+    }
+    if (w < words - 1) parts.push(tone(gapMs, sampleRate, 150));
+  }
+  return Buffer.concat(parts);
+}

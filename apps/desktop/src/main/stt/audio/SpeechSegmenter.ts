@@ -31,6 +31,12 @@ export type SpeechSegmenterOptions = {
   noiseFactor?: number;
   /** Window for the noise floor (minimum frame RMS seen in it). */
   noiseWindowMs?: number;
+  /**
+   * When a segment hits maxSegmentMs, it is cut at the quietest frame within this
+   * many ms before the cap (the gap between words) instead of mid-word; the rest
+   * carries over into the next segment. 0 = hard cut at the cap.
+   */
+  cutSearchMs?: number;
 };
 
 export class SpeechSegmenter {
@@ -45,6 +51,7 @@ export class SpeechSegmenter {
   private readonly noiseFactor: number;
   private readonly noiseWindowFrames: number;
   private readonly noiseWarmupFrames: number;
+  private readonly cutSearchFrames: number;
 
   private pending: Buffer = Buffer.alloc(0);
   private positionMs = 0;
@@ -54,6 +61,9 @@ export class SpeechSegmenter {
 
   private inSpeech = false;
   private segmentFrames: Buffer[] = [];
+  /** Per-frame RMS and voiced flag of segmentFrames (same indexes). */
+  private segmentRms: number[] = [];
+  private segmentVoiced: boolean[] = [];
   private segmentStartMs = 0;
   private voicedMs = 0;
   private silenceRunMs = 0;
@@ -71,6 +81,7 @@ export class SpeechSegmenter {
     this.initialNoiseFloor = this.minThreshold / this.noiseFactor;
     this.noiseWindowFrames = Math.max(1, Math.round((options.noiseWindowMs ?? 3000) / this.frameMs));
     this.noiseWarmupFrames = Math.max(1, Math.round(this.noiseWindowFrames / 3));
+    this.cutSearchFrames = Math.max(0, Math.round((options.cutSearchMs ?? 1500) / this.frameMs));
   }
 
   /** Feeds audio; returns the segments that were completed by it. */
@@ -91,6 +102,8 @@ export class SpeechSegmenter {
     if (this.pending.length >= 2 && this.inSpeech) {
       const tail = this.pending.subarray(0, this.pending.length - (this.pending.length % 2));
       this.segmentFrames.push(Buffer.from(tail));
+      this.segmentRms.push(frameRms(tail));
+      this.segmentVoiced.push(false);
       this.positionMs += (tail.length / 2 / this.sampleRate) * 1000;
     }
     this.pending = Buffer.alloc(0);
@@ -113,6 +126,8 @@ export class SpeechSegmenter {
       this.inSpeech = true;
       this.segmentStartMs = frameStartMs - this.preRoll.length * this.frameMs;
       this.segmentFrames = [...this.preRoll, frame];
+      this.segmentRms = [...this.preRoll.map(() => 0), rms];
+      this.segmentVoiced = [...this.preRoll.map(() => false), true];
       this.preRoll = [];
       this.voicedMs = this.frameMs;
       this.silenceRunMs = 0;
@@ -120,6 +135,8 @@ export class SpeechSegmenter {
     }
 
     this.segmentFrames.push(frame);
+    this.segmentRms.push(rms);
+    this.segmentVoiced.push(voiced);
     if (voiced) {
       this.voicedMs += this.frameMs;
       this.silenceRunMs = 0;
@@ -129,10 +146,55 @@ export class SpeechSegmenter {
 
     // Close before the next frame would push the clip past maxSegmentMs.
     const lengthMs = this.positionMs - this.segmentStartMs;
-    if (this.silenceRunMs >= this.silenceMs || lengthMs + this.frameMs > this.maxSegmentMs) {
+    if (this.silenceRunMs >= this.silenceMs) {
       return this.closeSegment();
     }
+    if (lengthMs + this.frameMs > this.maxSegmentMs) {
+      return this.splitAtQuietestFrame();
+    }
     return null;
+  }
+
+  /**
+   * Continuous audio (system audio, fast talkers) never pauses long enough to close
+   * a segment. Cut it at the quietest recent frame so words are not split, and keep
+   * the remainder open as the start of the next segment.
+   */
+  private splitAtQuietestFrame(): SpeechSegment | null {
+    const count = this.segmentFrames.length;
+    const searchFrom = Math.max(1, count - this.cutSearchFrames);
+    let cut = count;
+    let quietest = Infinity;
+    for (let i = searchFrom; i < count; i += 1) {
+      // `<=` prefers the latest of equally quiet frames: longer clip, fewer requests.
+      if (this.segmentRms[i] <= quietest) {
+        quietest = this.segmentRms[i];
+        cut = i + 1;
+      }
+    }
+    if (cut >= count) {
+      return this.closeSegment();
+    }
+
+    const headFrames = this.segmentFrames.slice(0, cut);
+    const headVoicedMs = this.segmentVoiced.slice(0, cut).filter(Boolean).length * this.frameMs;
+    const startMs = Math.max(0, this.segmentStartMs);
+    const cutMs = this.segmentStartMs + cut * this.frameMs;
+
+    const tailVoiced = this.segmentVoiced.slice(cut);
+    this.segmentFrames = this.segmentFrames.slice(cut);
+    this.segmentRms = this.segmentRms.slice(cut);
+    this.segmentVoiced = tailVoiced;
+    this.segmentStartMs = cutMs;
+    this.voicedMs = tailVoiced.filter(Boolean).length * this.frameMs;
+    let trailingSilence = 0;
+    for (let i = tailVoiced.length - 1; i >= 0 && !tailVoiced[i]; i -= 1) trailingSilence += 1;
+    this.silenceRunMs = trailingSilence * this.frameMs;
+
+    if (headVoicedMs < this.minSpeechMs) {
+      return null;
+    }
+    return { pcm: Buffer.concat(headFrames), startMs, endMs: cutMs };
   }
 
   /**
@@ -156,6 +218,8 @@ export class SpeechSegmenter {
     const endMs = this.positionMs;
     this.inSpeech = false;
     this.segmentFrames = [];
+    this.segmentRms = [];
+    this.segmentVoiced = [];
     this.voicedMs = 0;
     this.silenceRunMs = 0;
     if (voicedMs < this.minSpeechMs || frames.length === 0) {

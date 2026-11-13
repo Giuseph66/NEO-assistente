@@ -193,11 +193,15 @@ export interface AnalyzeScreenshotResponse {
   sessionId?: number;
   response?: VisionResponse;
   error?: string;
+  errorCode?: string;
 }
 
 export interface AnalyzeChatRequest {
+  /** Message to send. May be empty when `regenerate` is set. */
   prompt: string;
   sessionId?: number;
+  /** Answer the conversation's last user message again, without adding a new user message. */
+  regenerate?: boolean;
   context?: string;
   options?: {
     temperature?: number;
@@ -210,4 +214,6 @@ export interface AnalyzeChatResponse {
   sessionId?: number;
   response?: VisionResponse;
   error?: string;
+  /** Machine-readable failure reason (`rate_limited`, `not_logged_in`, …). */
+  errorCode?: string;
 }

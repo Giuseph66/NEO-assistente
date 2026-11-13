@@ -18,6 +18,7 @@ import {
 import { getLogger } from '@neo/logger';
 import { existsSync } from 'fs';
 import { getOAuthController } from '../auth/openaiOAuth';
+import { deriveConversationTitle } from '../../common/chat';
 
 const logger = getLogger();
 
@@ -95,6 +96,9 @@ export class AIService {
     request: AnalyzeScreenshotRequest
   ): Promise<AnalyzeScreenshotResponse> {
     const startTime = Date.now();
+    const { providerId: requestProviderId, modelName: requestModelName } = this.config;
+    // Known before the model call so a failure can still say which conversation it belongs to
+    let conversationId: number | undefined = request.sessionId || undefined;
 
     try {
       // Obtém screenshot do banco
@@ -145,6 +149,7 @@ export class AIService {
         }
       }
 
+      conversationId = sessionId;
       const history = this.db.getAIMessages(sessionId);
       const hasSystemMessage = history.some((message) => message.role === 'system');
 
@@ -164,6 +169,13 @@ export class AIService {
           content: prompt,
         });
       }
+
+      this.db.setAISessionTitleIfEmpty(
+        sessionId,
+        request.mode === 'extract_text'
+          ? 'Texto extraído da captura'
+          : deriveConversationTitle(prompt) || 'Análise de captura de tela'
+      );
 
       const messages = this.db.getAIMessages(sessionId).map((message) => ({
         role: message.role as 'system' | 'user' | 'assistant',
@@ -187,19 +199,24 @@ export class AIService {
       );
 
       // Salva mensagem da assistente
+      const duration = Date.now() - startTime;
       this.db.saveAIMessage({
         session_id: sessionId,
         role: 'assistant',
         content: response.answerText,
         recognized_text: response.recognizedText,
+        provider_id: response.providerUsed ?? requestProviderId,
+        model_name: response.modelUsed || requestModelName,
+        duration_ms: duration,
+        tokens_in: response.usage?.tokensIn,
+        tokens_out: response.usage?.tokensOut,
       });
 
       // Salva run no banco
-      const duration = Date.now() - startTime;
       this.db.saveAIRun({
         session_id: sessionId,
-        provider_id: this.config.providerId,
-        model_name: this.config.modelName,
+        provider_id: response.providerUsed ?? requestProviderId,
+        model_name: response.modelUsed || requestModelName,
         api_key_id: this.toPersistedApiKeyId(response.apiKeyIdUsed),
         status: 'success',
         duration_ms: duration,
@@ -213,24 +230,18 @@ export class AIService {
     } catch (error: any) {
       logger.error({ err: error, request }, 'Failed to analyze screenshot');
 
-      // Tenta salvar erro no banco se tiver sessionId
+      // Registra a falha na conversa a que ela pertence (já conhecida antes da chamada ao modelo)
       try {
-        const screenshot = this.db.getScreenshotById(request.screenshotId);
-        if (screenshot) {
-          const sessions = this.db.getAISessions(request.screenshotId);
-          if (sessions.length > 0) {
-            const sessionId = sessions[0].id;
-            const duration = Date.now() - startTime;
-            this.db.saveAIRun({
-              session_id: sessionId,
-              provider_id: this.config.providerId,
-              model_name: this.config.modelName,
-              status: 'error',
-              duration_ms: duration,
-              error_code: error.code || 'UNKNOWN',
-              error_message_redacted: this.sanitizeError(error),
-            });
-          }
+        if (conversationId) {
+          this.db.saveAIRun({
+            session_id: conversationId,
+            provider_id: requestProviderId,
+            model_name: requestModelName,
+            status: 'error',
+            duration_ms: Date.now() - startTime,
+            error_code: error.code || 'UNKNOWN',
+            error_message_redacted: this.sanitizeError(error),
+          });
         }
       } catch (dbError) {
         logger.error({ err: dbError }, 'Failed to save error to database');
@@ -238,7 +249,9 @@ export class AIService {
 
       return {
         success: false,
+        sessionId: conversationId,
         error: this.sanitizeError(error),
+        errorCode: error.code || 'UNKNOWN',
       };
     }
   }
@@ -251,10 +264,14 @@ export class AIService {
   ): Promise<AnalyzeChatResponse> {
     const startTime = Date.now();
     let sessionId = request.sessionId || 0;
+    // The config can change while a (slow) request is in flight; runs and metadata must
+    // describe the provider/model this request actually started with.
+    const { providerId: requestProviderId, modelName: requestModelName } = this.config;
 
     try {
+      const regenerate = request.regenerate === true;
       const prompt = request.prompt?.trim() || '';
-      if (!prompt) {
+      if (!prompt && !regenerate) {
         return {
           success: false,
           error: 'Mensagem vazia',
@@ -270,30 +287,48 @@ export class AIService {
         }
       }
 
-      if (!sessionId) {
-        sessionId = this.db.saveAISession({
-          screenshotId: null,
-          providerId: this.config.providerId,
-          modelName: this.config.modelName,
-        });
-      }
+      if (regenerate) {
+        // Answer the last user message again: nothing new is added to the conversation.
+        const last = sessionId
+          ? this.db.getAIMessages(sessionId).filter((m) => m.role !== 'system').pop()
+          : undefined;
+        if (!last || last.role !== 'user') {
+          return {
+            success: false,
+            sessionId: sessionId || undefined,
+            error: 'Não há mensagem sem resposta para reenviar.',
+            errorCode: 'nothing_to_retry',
+          };
+        }
+      } else {
+        if (!sessionId) {
+          sessionId = this.db.saveAISession({
+            screenshotId: null,
+            providerId: requestProviderId,
+            modelName: requestModelName,
+          });
+        }
 
-      const history = this.db.getAIMessages(sessionId);
-      const hasSystemMessage = history.some((message) => message.role === 'system');
+        const history = this.db.getAIMessages(sessionId);
+        const hasSystemMessage = history.some((message) => message.role === 'system');
 
-      if (context && !hasSystemMessage) {
+        if (context && !hasSystemMessage) {
+          this.db.saveAIMessage({
+            session_id: sessionId,
+            role: 'system',
+            content: context,
+          });
+        }
+
         this.db.saveAIMessage({
           session_id: sessionId,
-          role: 'system',
-          content: context,
+          role: 'user',
+          content: prompt,
         });
-      }
 
-      this.db.saveAIMessage({
-        session_id: sessionId,
-        role: 'user',
-        content: prompt,
-      });
+        const title = deriveConversationTitle(prompt);
+        if (title) this.db.setAISessionTitleIfEmpty(sessionId, title);
+      }
 
       const messages = this.db.getAIMessages(sessionId).map((message) => ({
         role: message.role as 'system' | 'user' | 'assistant',
@@ -302,18 +337,23 @@ export class AIService {
 
       const response = await this.analyzeTextWithFallback(messages, request.options);
 
+      const duration = Date.now() - startTime;
       this.db.saveAIMessage({
         session_id: sessionId,
         role: 'assistant',
         content: response.answerText,
         recognized_text: response.recognizedText,
+        provider_id: response.providerUsed ?? requestProviderId,
+        model_name: response.modelUsed || requestModelName,
+        duration_ms: duration,
+        tokens_in: response.usage?.tokensIn,
+        tokens_out: response.usage?.tokensOut,
       });
 
-      const duration = Date.now() - startTime;
       this.db.saveAIRun({
         session_id: sessionId,
-        provider_id: this.config.providerId,
-        model_name: this.config.modelName,
+        provider_id: response.providerUsed ?? requestProviderId,
+        model_name: response.modelUsed || requestModelName,
         api_key_id: this.toPersistedApiKeyId(response.apiKeyIdUsed),
         status: 'success',
         duration_ms: duration,
@@ -325,15 +365,15 @@ export class AIService {
         response,
       };
     } catch (error: any) {
-      logger.error({ err: error, request }, 'Failed to analyze chat text');
+      logger.error({ err: error, request: { ...request, prompt: undefined } }, 'Failed to analyze chat text');
 
       try {
         if (sessionId) {
           const duration = Date.now() - startTime;
           this.db.saveAIRun({
             session_id: sessionId,
-            provider_id: this.config.providerId,
-            model_name: this.config.modelName,
+            provider_id: requestProviderId,
+            model_name: requestModelName,
             status: 'error',
             duration_ms: duration,
             error_code: error.code || 'UNKNOWN',
@@ -346,7 +386,10 @@ export class AIService {
 
       return {
         success: false,
+        // The conversation exists even though the answer failed: callers need it to show the error there.
+        sessionId: sessionId || undefined,
         error: this.sanitizeError(error),
+        errorCode: error.code || 'UNKNOWN',
       };
     }
   }
@@ -365,20 +408,22 @@ export class AIService {
     sessionId: number,
     requestOptions?: AnalyzeScreenshotRequest['options']
   ): Promise<VisionResponse & { apiKeyIdUsed?: number }> {
+    // Fix the provider/model for the whole request (the user may switch while it runs).
+    const config = { ...this.config };
     const providerManager = getAIProviderManager();
-    const provider = providerManager.getProvider(this.config.providerId);
+    const provider = providerManager.getProvider(config.providerId);
 
     if (!provider) {
-      throw new Error(`Provider ${this.config.providerId} not found`);
+      throw new Error(`Provider ${config.providerId} not found`);
     }
 
     let lastError: Error | null = null;
-    const maxAttempts = this.config.fallbackMaxAttempts;
+    const maxAttempts = config.fallbackMaxAttempts;
     let skipOAuth = this.shouldSkipOAuthForOpenAIModelCalls();
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       // Obtém próxima key disponível
-      const apiKey = await this.keyPool.getNextKeyAsync(this.config.providerId, {
+      const apiKey = await this.keyPool.getNextKeyAsync(config.providerId, {
         skipOAuth,
       });
       if (!apiKey) {
@@ -394,7 +439,7 @@ export class AIService {
 
         const providerError = this.getNoAvailableApiKeyError();
         if (providerError) throw providerError;
-        const keys = this.db.getAIApiKeys(this.config.providerId);
+        const keys = this.db.getAIApiKeys(config.providerId);
         const hasInsufficientQuota = keys.some((k) => k.last_error_code === 'insufficient_quota');
         if (hasInsufficientQuota) {
           throw new Error(
@@ -412,9 +457,9 @@ export class AIService {
         const resolvedMaxTokens = this.resolveMaxTokens(requestOptions?.maxTokens);
         const options: VisionRequest['options'] = {
           temperature: requestOptions?.temperature ?? 0.7,
-          timeoutMs: this.config.timeoutMs,
-          modelName: this.config.modelName,
-          reasoningEffort: this.config.reasoningEffort,
+          timeoutMs: config.timeoutMs,
+          modelName: config.modelName,
+          reasoningEffort: config.reasoningEffort,
         };
         if (typeof resolvedMaxTokens === 'number') {
           options.maxTokens = resolvedMaxTokens;
@@ -463,7 +508,7 @@ export class AIService {
           skipOAuth = true;
           logger.warn(
             {
-              providerId: this.config.providerId,
+              providerId: config.providerId,
               attempt,
               statusCode: error.statusCode,
               error: this.sanitizeError(error),
@@ -496,19 +541,21 @@ export class AIService {
     messages: VisionRequest['messages'],
     requestOptions?: AnalyzeChatRequest['options']
   ): Promise<VisionResponse & { apiKeyIdUsed?: number }> {
+    // Fix the provider/model for the whole request (the user may switch while it runs).
+    const config = { ...this.config };
     const providerManager = getAIProviderManager();
-    const provider = providerManager.getProvider(this.config.providerId);
+    const provider = providerManager.getProvider(config.providerId);
 
     if (!provider) {
-      throw new Error(`Provider ${this.config.providerId} not found`);
+      throw new Error(`Provider ${config.providerId} not found`);
     }
 
     let lastError: Error | null = null;
-    const maxAttempts = this.config.fallbackMaxAttempts;
+    const maxAttempts = config.fallbackMaxAttempts;
     let skipOAuth = this.shouldSkipOAuthForOpenAIModelCalls();
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const apiKey = await this.keyPool.getNextKeyAsync(this.config.providerId, {
+      const apiKey = await this.keyPool.getNextKeyAsync(config.providerId, {
         skipOAuth,
       });
       if (!apiKey) {
@@ -523,7 +570,7 @@ export class AIService {
 
         const providerError = this.getNoAvailableApiKeyError();
         if (providerError) throw providerError;
-        const keys = this.db.getAIApiKeys(this.config.providerId);
+        const keys = this.db.getAIApiKeys(config.providerId);
         const hasInsufficientQuota = keys.some((k) => k.last_error_code === 'insufficient_quota');
         if (hasInsufficientQuota) {
           throw new Error(
@@ -541,9 +588,9 @@ export class AIService {
         const resolvedMaxTokens = this.resolveMaxTokens(requestOptions?.maxTokens);
         const options: VisionRequest['options'] = {
           temperature: requestOptions?.temperature ?? 0.7,
-          timeoutMs: this.config.timeoutMs,
-          modelName: this.config.modelName,
-          reasoningEffort: this.config.reasoningEffort,
+          timeoutMs: config.timeoutMs,
+          modelName: config.modelName,
+          reasoningEffort: config.reasoningEffort,
         };
         if (typeof resolvedMaxTokens === 'number') {
           options.maxTokens = resolvedMaxTokens;
@@ -581,7 +628,7 @@ export class AIService {
           skipOAuth = true;
           logger.warn(
             {
-              providerId: this.config.providerId,
+              providerId: config.providerId,
               attempt,
               statusCode: error.statusCode,
               error: this.sanitizeError(error),

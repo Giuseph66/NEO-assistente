@@ -115,6 +115,28 @@ type VirtualDeviceStatus = {
   error: string | null;
 };
 
+/** A chat message as the main process returns it (answers carry the model that produced them). */
+type ChatMessageRow = {
+  id: number;
+  sessionId: number;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  recognizedText?: string;
+  createdAt: number;
+  providerId?: string;
+  modelName?: string;
+  durationMs?: number;
+  tokensIn?: number;
+  tokensOut?: number;
+};
+
+type ChatConversation = {
+  session: { id: number; title: string | null; providerId: string; modelName: string; screenshotId: number | null; createdAt: number };
+  messages: ChatMessageRow[];
+  /** The last attempt failed and nothing answered it since. */
+  lastError: { code?: string; message?: string; at: number; providerId?: string; modelName?: string } | null;
+};
+
 type CodexCliAuthStatus = {
   installed: boolean;
   loggedIn: boolean;
@@ -233,7 +255,8 @@ declare global {
       analyzeText: (request: AnalyzeChatRequest) => Promise<AnalyzeChatResponse>;
       extractText: (screenshotId: number) => Promise<{ success: boolean; text?: string; error?: string }>;
       getSessions: (screenshotId: number) => Promise<Array<{ id: number; screenshotId: number | null; providerId: string; modelName: string; createdAt: number }>>;
-      getMessages: (sessionId: number) => Promise<Array<{ id: number; sessionId: number; role: string; content: string; recognizedText?: string; createdAt: number }>>;
+      getMessages: (sessionId: number) => Promise<ChatMessageRow[]>;
+      getConversation: (sessionId: number) => Promise<ChatConversation | null>;
       createSession: (screenshotId: number) => Promise<{ sessionId: number }>;
       savePromptTemplate: (template: Omit<PromptTemplate, 'id' | 'created_at' | 'updated_at'>) => Promise<{ success: boolean; id: number }>;
       getPromptTemplates: (category?: string) => Promise<Array<{ id: number; name: string; promptText: string; category?: string; createdAt: number; updatedAt: number }>>;
@@ -241,7 +264,7 @@ declare global {
       getActivePersonality: () => Promise<{ promptId: number } | null>;
       onAnalysisStarted: (cb: (event: { mode: 'screenshot' | 'chat'; screenshotId?: number; sessionId?: number; startedAt?: number; timeoutMs?: number; prompt?: string }) => void) => () => void;
       onAnalysisCompleted: (cb: (event: { mode: 'screenshot' | 'chat'; screenshotId?: number; sessionId?: number; success: boolean; usage?: { tokensIn?: number; tokensOut?: number }; model?: string; provider?: string }) => void) => () => void;
-      onAnalysisError: (cb: (event: { mode: 'screenshot' | 'chat'; screenshotId?: number; sessionId?: number; error: string }) => void) => () => void;
+      onAnalysisError: (cb: (event: { mode: 'screenshot' | 'chat'; screenshotId?: number; sessionId?: number; error: string; errorCode?: string }) => void) => () => void;
     };
     translation: {
       start: (options: TranslationStartOptions) => Promise<{ success: boolean }>;

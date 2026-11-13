@@ -11,7 +11,6 @@ import {
   AIProvider,
   AIModel,
   AIApiKey,
-  AIMessage,
   AIRun,
   PromptTemplate,
 } from '@neo/shared';
@@ -23,7 +22,50 @@ export interface AISessionRecord {
   providerId: string;
   modelName: string;
   summary?: string | null;
+  /** Conversation subject (derived from the first user message, renamable). */
+  title?: string | null;
   createdAt: number;
+}
+
+/** A row of `ai_messages`. Provider/model/timing are set on assistant answers. */
+export interface AIMessageRow {
+  id: number;
+  session_id: number;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  recognized_text?: string | null;
+  created_at: number;
+  provider_id?: string | null;
+  model_name?: string | null;
+  duration_ms?: number | null;
+  tokens_in?: number | null;
+  tokens_out?: number | null;
+}
+
+export type NewAIMessage = Omit<AIMessageRow, 'id' | 'created_at'>;
+
+export interface NewAIRun {
+  session_id: number;
+  provider_id: string;
+  model_name: string;
+  api_key_id?: number | null;
+  status: 'success' | 'error';
+  duration_ms?: number | null;
+  error_code?: string | null;
+  error_message_redacted?: string | null;
+}
+
+/** A row of `ai_runs` (one model call), as returned by `getLastAIRun`. */
+export interface AIRunRow {
+  id: number;
+  session_id: number;
+  provider_id: string;
+  model_name: string;
+  status: 'success' | 'error';
+  duration_ms: number | null;
+  error_code: string | null;
+  error_message_redacted: string | null;
+  created_at: number;
 }
 
 /**
@@ -520,9 +562,37 @@ export class DatabaseManager {
    */
   saveAISession(session: Omit<AISessionRecord, 'id' | 'createdAt'>): number {
     const result = this.db
-      .prepare('INSERT INTO ai_sessions (screenshot_id, provider_id, model_name, summary, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(session.screenshotId ?? null, session.providerId, session.modelName, session.summary ?? null, Date.now());
+      .prepare('INSERT INTO ai_sessions (screenshot_id, provider_id, model_name, summary, title, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(
+        session.screenshotId ?? null,
+        session.providerId,
+        session.modelName,
+        session.summary ?? null,
+        session.title ?? null,
+        Date.now()
+      );
     return result.lastInsertRowid as number;
+  }
+
+  /** Sets the conversation title (empty clears it). */
+  updateAISessionTitle(id: number, title: string | null): void {
+    this.db.prepare('UPDATE ai_sessions SET title = ? WHERE id = ?').run(title?.trim() || null, id);
+  }
+
+  /** Sets the title only if the conversation has none yet (auto-title from the first message). */
+  setAISessionTitleIfEmpty(id: number, title: string): void {
+    this.db.prepare("UPDATE ai_sessions SET title = ? WHERE id = ? AND (title IS NULL OR title = '')").run(title, id);
+  }
+
+  /** The most recent model call of a conversation (used to show a failure the panel missed). */
+  getLastAIRun(sessionId: number): AIRunRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, session_id, provider_id, model_name, status, duration_ms, error_code, error_message_redacted, created_at
+         FROM ai_runs WHERE session_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`
+      )
+      .get(sessionId);
+    return (row as AIRunRow | undefined) ?? null;
   }
 
   /**
@@ -538,6 +608,7 @@ export class DatabaseManager {
       providerId: s.provider_id,
       modelName: s.model_name,
       summary: s.summary,
+      title: s.title,
       createdAt: s.created_at,
     }));
   }
@@ -556,6 +627,7 @@ export class DatabaseManager {
           WHERE (s.created_at >= ? AND s.created_at <= ?)
           AND (
             s.summary LIKE ? OR 
+            s.title LIKE ? OR 
             s.model_name LIKE ? OR 
             s.provider_id LIKE ? OR 
             m.content LIKE ? OR
@@ -563,7 +635,7 @@ export class DatabaseManager {
           )
           ORDER BY s.created_at DESC
         `)
-        .all(start, end, search, search, search, search, search);
+        .all(start, end, search, search, search, search, search, search);
     } else {
       rows = this.db
         .prepare('SELECT * FROM ai_sessions WHERE created_at >= ? AND created_at <= ? ORDER BY created_at DESC')
@@ -576,6 +648,7 @@ export class DatabaseManager {
       providerId: s.provider_id,
       modelName: s.model_name,
       summary: s.summary,
+      title: s.title,
       createdAt: s.created_at,
     }));
   }
@@ -593,6 +666,7 @@ export class DatabaseManager {
       providerId: s.provider_id,
       modelName: s.model_name,
       summary: s.summary,
+      title: s.title,
       createdAt: s.created_at
     } as AISessionRecord;
   }
@@ -625,16 +699,23 @@ export class DatabaseManager {
   /**
    * Salva uma mensagem de chat
    */
-  saveAIMessage(message: Omit<AIMessage, 'id' | 'created_at'>): number {
+  saveAIMessage(message: NewAIMessage): number {
     const result = this.db
       .prepare(
-        'INSERT INTO ai_messages (session_id, role, content, recognized_text, created_at) VALUES (?, ?, ?, ?, ?)'
+        `INSERT INTO ai_messages
+         (session_id, role, content, recognized_text, provider_id, model_name, duration_ms, tokens_in, tokens_out, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         message.session_id,
         message.role,
         message.content,
         message.recognized_text || null,
+        message.provider_id ?? null,
+        message.model_name ?? null,
+        message.duration_ms ?? null,
+        message.tokens_in ?? null,
+        message.tokens_out ?? null,
         Date.now()
       );
     return result.lastInsertRowid as number;
@@ -643,10 +724,10 @@ export class DatabaseManager {
   /**
    * Obtém mensagens de uma sessão
    */
-  getAIMessages(sessionId: number): AIMessage[] {
+  getAIMessages(sessionId: number): AIMessageRow[] {
     return this.db
-      .prepare('SELECT * FROM ai_messages WHERE session_id = ? ORDER BY created_at ASC')
-      .all(sessionId) as AIMessage[];
+      .prepare('SELECT * FROM ai_messages WHERE session_id = ? ORDER BY created_at ASC, id ASC')
+      .all(sessionId) as AIMessageRow[];
   }
 
   // ========== AI Run Methods ==========
@@ -654,7 +735,7 @@ export class DatabaseManager {
   /**
    * Salva um registro de execução (run)
    */
-  saveAIRun(run: Omit<AIRun, 'id' | 'created_at'>): number {
+  saveAIRun(run: NewAIRun): number {
     const result = this.db
       .prepare(
         `INSERT INTO ai_runs 

@@ -1,3 +1,4 @@
+import { describeChatError } from '../../../common/chat';
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useSttState } from '../../store/sttStore';
@@ -21,6 +22,7 @@ interface Session {
     createdAt: number;
     modelName: string;
     providerId: string;
+    title?: string | null;
 }
 
 interface Personality {
@@ -52,6 +54,14 @@ export const HUD: React.FC<HUDProps> = ({
     const [activePersonality, setActivePersonality] = useState<Personality | null>(null);
     const [activeSessionId, setActiveSessionId] = useState<number | null>(sessionId ?? null);
     const [isSendingQuestion, setIsSendingQuestion] = useState(false);
+    // Short failure notice shown in the input for a few seconds (the details are in the chat)
+    const [hudNotice, setHudNotice] = useState<string | null>(null);
+    const hudNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const showHudNotice = (text: string) => {
+        if (hudNoticeTimerRef.current) clearTimeout(hudNoticeTimerRef.current);
+        setHudNotice(text);
+        hudNoticeTimerRef.current = setTimeout(() => setHudNotice(null), 7000);
+    };
     const [isTextHighlightLoading, setIsTextHighlightLoading] = useState(false);
     
     // Estado para feedback visual quando sobre a janela vintage
@@ -397,13 +407,19 @@ export const HUD: React.FC<HUDProps> = ({
                 window.electron.ipcRenderer.send('window:open-session');
             }
 
-            await window.ai.analyzeText({
+            const result = await window.ai.analyzeText({
                 prompt,
                 sessionId: targetSessionId || undefined,
                 context: activePersonality?.promptText || undefined
             });
+            if (result && !result.success) {
+                // The message is saved in the conversation and the chat shows the reason with a
+                // retry button; the HUD only says that it failed (it used to ignore the result).
+                showHudNotice(`Sem resposta: ${describeChatError(result.errorCode, result.error).title}`);
+            }
         } catch (error) {
             console.error('Failed to send HUD question:', error);
+            showHudNotice('Sem resposta: não foi possível enviar a mensagem.');
         } finally {
             setIsSendingQuestion(false);
         }
@@ -526,7 +542,7 @@ export const HUD: React.FC<HUDProps> = ({
                 <div className="hud-section input-wrapper">
                     <input
                         type="text"
-                        placeholder="Perguntar..."
+                        placeholder={hudNotice ?? 'Perguntar...'}
                         value={hudDisplayValue}
                         onChange={(e) => {
                             const newValue = e.target.value;
@@ -536,7 +552,8 @@ export const HUD: React.FC<HUDProps> = ({
                             setInputValue(newValue);
                         }}
                         onKeyDown={handleHudInputKeyDown}
-                        className="hud-input"
+                        className={`hud-input${hudNotice ? ' has-notice' : ''}`}
+                        title={hudNotice ?? undefined}
                     />
                     {inputValue.trim().length > 0 && (
                         <>

@@ -3,7 +3,7 @@ import type { STTFinalEvent, STTStatus } from '@neo/shared';
 import { CodexTranscriptionProvider } from './CodexTranscriptionProvider';
 import { CodexTranscriptionClient, CodexTranscriptionError } from '../codex/CodexTranscriptionClient';
 import { decodeWav } from '../audio/wav';
-import { silence, tone } from '../../testing/fixtures';
+import { continuousSpeech, silence, tone } from '../../testing/fixtures';
 
 vi.mock('../../auth/codexCredentials', () => ({
   getCodexCredentials: vi.fn(async () => ({ accessToken: 't' })),
@@ -103,5 +103,44 @@ describe('CodexTranscriptionProvider', () => {
     const { errors } = collect(provider);
     await expect(provider.start(config)).rejects.toThrow('sem login');
     expect(errors).toEqual(['sem login']);
+  });
+
+  it('overlaps requests after the first success but keeps finals in order', async () => {
+    let active = 0;
+    let maxActive = 0;
+    let n = 0;
+    const { client, transcribe } = fakeClient(async () => {
+      const id = ++n;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      // later clips finish first: emission order must still follow speech order
+      await new Promise((r) => setTimeout(r, id === 1 ? 5 : 40 - id * 5));
+      active -= 1;
+      return `t${id}`;
+    });
+    const provider = new CodexTranscriptionProvider({ client });
+    const { finals } = collect(provider);
+    await provider.start(config);
+    const chunks: Buffer[] = [];
+    for (let i = 0; i < 5; i += 1) chunks.push(tone(600), silence(900));
+    provider.pushAudio(Buffer.concat(chunks));
+    await provider.stop();
+
+    expect(transcribe).toHaveBeenCalledTimes(5);
+    expect(maxActive).toBe(2);
+    expect(finals.map((f) => f.text)).toEqual(['t1', 't2', 't3', 't4', 't5']);
+  });
+
+  it('uses the system-audio segmentation profile for continuous audio', async () => {
+    const { client, transcribe } = fakeClient(async () => 'x');
+    const provider = new CodexTranscriptionProvider({ client });
+    await provider.start({ ...config, segmentation: { silenceMs: 400, maxSegmentMs: 7000 } });
+    // ~20 s without any 400 ms pause
+    provider.pushAudio(continuousSpeech(7));
+    await provider.stop();
+    const lengths = transcribe.mock.calls.map((c) => (c[0] as { audio: Buffer }).audio.length);
+    expect(lengths.length).toBeGreaterThanOrEqual(3);
+    // 7 s of 16 kHz PCM16 + WAV header
+    expect(Math.max(...lengths)).toBeLessThanOrEqual(7 * 16000 * 2 + 44);
   });
 });

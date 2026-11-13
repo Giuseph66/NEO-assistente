@@ -11,6 +11,9 @@ const FALLBACK_DEFAULT_MODEL: Partial<Record<AIProviderId, string>> = {
   'codex-cli': 'gpt-6.1-sol',
 };
 
+/** `gpt-6.1-sol`, `o3`: lowercase, no spaces. */
+export const OPENAI_MODEL_ID = /^(gpt-|o\d)[a-z0-9._-]*$/;
+
 function getKnownModelIds(providerId: AIProviderId): string[] {
   // fallback vazio => se não existir no catálogo, retorna lista vazia.
   const models = getModelsForProvider(providerId, []);
@@ -31,8 +34,10 @@ export function isModelKnownForProvider(
 ): boolean {
   if (!modelName) return false;
   // The Codex CLI's model list depends on the account and changes often (the UI reads it
-  // from the CLI), so any id is accepted instead of being reset to the first catalog entry.
-  if (providerId === 'codex-cli') return true;
+  // from the CLI), so any OpenAI-shaped id is accepted instead of being reset to the first
+  // catalog entry. Ids of other vendors ("claude-…") or display labels ("GPT-5.2 Standard")
+  // must still be rejected: Codex answers them with "model not supported".
+  if (providerId === 'codex-cli') return OPENAI_MODEL_ID.test(modelName.trim());
   const knownIds = getKnownModelIds(providerId).map((id) => id.toLowerCase());
   return knownIds.includes(modelName.toLowerCase());
 }

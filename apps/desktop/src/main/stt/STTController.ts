@@ -16,6 +16,9 @@ import { getOAuthController } from '../auth/openaiOAuth';
 
 const logger = getLogger();
 
+/** Provider error codes after which the provider will not transcribe anything else. */
+const FATAL_PROVIDER_CODES = new Set(['not_connected', 'unauthorized', 'forbidden']);
+
 export class STTController {
   private status: STTStatus = { state: 'idle' };
   private provider: LiveTranscriptionProvider | null = null;
@@ -32,6 +35,9 @@ export class STTController {
   private lastLevelAt = 0;
   /** Sample rate the running provider was started with (may differ from the stored config). */
   private activeSampleRate = 16000;
+  /** Set while tearing down after an error, so provider status updates don't hide the error. */
+  private suppressProviderStatus = false;
+  private cleanupPromise: Promise<void> | null = null;
 
   constructor(modelManager: ModelManager, db?: DatabaseManager) {
     this.modelManager = modelManager;
@@ -58,6 +64,10 @@ export class STTController {
     ) {
       return;
     }
+
+    // A previous run that failed may still be tearing down.
+    if (this.cleanupPromise || this.provider || this.audioSource) await this.cleanup();
+    this.suppressProviderStatus = false;
 
     const storedConfig = configOverride || this.getConfig();
     let effectiveConfig = storedConfig;
@@ -105,7 +115,9 @@ export class STTController {
       this.provider = provider;
       provider.onPartial((event) => this.emitter.emit('partial', event));
       provider.onFinal((event) => this.emitter.emit('final', event));
-      provider.onStatus((status) => this.setStatus(status));
+      provider.onStatus((status) => {
+        if (!this.suppressProviderStatus) this.setStatus(status);
+      });
       provider.onError((error) => this.handleError(error));
       provider.onDebug?.((message) => this.emitDebug(message));
 
@@ -154,7 +166,7 @@ export class STTController {
         this.updateLevel(chunk);
         this.provider?.pushAudio(chunk);
       });
-      this.audioSource.onError((error) => this.handleError(error.message));
+      this.audioSource.onError((error) => this.handleError(error.message, true));
       this.activeSampleRate = effectiveConfig.sampleRate;
       await this.audioSource.start({ sampleRate: effectiveConfig.sampleRate });
       if (this.audioSource instanceof ArecordAudioSource) {
@@ -169,7 +181,7 @@ export class STTController {
         this.setStatus({ state: 'listening', modelId: modelName, providerId });
       }
     } catch (error) {
-      this.handleError(error instanceof Error ? error.message : 'Falha ao iniciar STT');
+      this.handleError(error instanceof Error ? error.message : 'Falha ao iniciar STT', true);
       await this.cleanup();
     }
   }
@@ -178,12 +190,20 @@ export class STTController {
     if (this.status.state === 'idle' || this.status.state === 'stopping' || this.status.state === 'finalizing') {
       return;
     }
+    if (this.status.state === 'error') {
+      // Release whatever is left (handleError may already have) and clear the error.
+      this.suppressProviderStatus = true;
+      await this.cleanup();
+      this.setStatus({ state: 'idle' });
+      return;
+    }
 
     this.setStatus({ state: 'finalizing', providerId: this.status.providerId });
 
     await this.cleanup();
 
-    if (this.status.state !== 'error') {
+    // cleanup() may have reported an error through the provider/source callbacks.
+    if ((this.status as STTStatus).state !== 'error') {
       this.setStatus({ state: 'idle' });
     }
   }
@@ -259,7 +279,7 @@ export class STTController {
       this.updateLevel(chunk);
       this.provider?.pushAudio(chunk);
     });
-    newSource.onError((error) => this.handleError(error.message));
+    newSource.onError((error) => this.handleError(error.message, true));
     // Must match the rate the provider was started with, not the stored config.
     await newSource.start({ sampleRate: this.activeSampleRate });
 
@@ -312,7 +332,12 @@ export class STTController {
     }
   }
 
-  private handleError(error: LiveTranscriptionError | string): void {
+  /**
+   * Fatal = the pipeline cannot recover by itself: the audio source died, start failed,
+   * or the provider says so (Codex login/permission). Other provider errors (e.g. a
+   * server `error` event mid-session) keep the previous behaviour: report, keep running.
+   */
+  private handleError(error: LiveTranscriptionError | string, fatal = false): void {
     const payload =
       typeof error === 'string'
         ? { message: error }
@@ -320,9 +345,26 @@ export class STTController {
     logger.error({ message: payload.message, debug: payload.debug, providerId: payload.providerId }, 'STT error');
     this.emitter.emit('error', payload);
     this.setStatus({ state: 'error', message: payload.message, providerId: payload.providerId, debug: payload.debug });
+    const providerFatal =
+      typeof error !== 'string' && !!error.code && FATAL_PROVIDER_CODES.has(error.code);
+    if ((fatal || providerFatal) && (this.provider || this.audioSource)) {
+      // Release capture and provider; otherwise they keep running behind the error state.
+      this.suppressProviderStatus = true;
+      void this.cleanup();
+    }
   }
 
-  private async cleanup(): Promise<void> {
+  /** Single-flight: concurrent callers (stop + error) share one teardown. */
+  private cleanup(): Promise<void> {
+    if (!this.cleanupPromise) {
+      this.cleanupPromise = this.runCleanup().finally(() => {
+        this.cleanupPromise = null;
+      });
+    }
+    return this.cleanupPromise;
+  }
+
+  private async runCleanup(): Promise<void> {
     try {
       await this.audioSource?.stop();
     } catch (error) {

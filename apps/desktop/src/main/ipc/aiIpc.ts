@@ -1,8 +1,9 @@
 import { ipcMain, BrowserWindow } from 'electron';
 import { listAnthropicModelIds } from '../ai/providers/AnthropicProvider';
 import { getCodexCli } from '../ai/codexCli/CodexCli';
+import { analysisOutcomeEvent } from './analysisEvents';
 import { filterOpenAIChatModelIds } from '../ai/openaiModels';
-import { DatabaseManager } from '../database';
+import { DatabaseManager, AIMessageRow } from '../database';
 import { getAIService, getKeyStorage } from '../ai/AIServiceManager';
 import { getAIProviderManager } from '../ai/AIProviderManager';
 import { ApiKeyPool } from '../ai/ApiKeyPool';
@@ -427,16 +428,8 @@ export function registerAIIpc(db: DatabaseManager): void {
     try {
       const result = await aiService.analyzeScreenshot(request);
 
-      // Broadcast sucesso
-      broadcast('ai.analysis.completed', {
-        mode: 'screenshot',
-        screenshotId: request.screenshotId,
-        sessionId: result.sessionId,
-        success: result.success,
-        usage: result.response?.usage,
-        model: result.response?.modelUsed,
-        provider: result.response?.providerUsed,
-      });
+      const outcome = analysisOutcomeEvent('screenshot', request, result);
+      broadcast(outcome.channel, outcome.payload);
 
       return result;
     } catch (error: any) {
@@ -471,14 +464,8 @@ export function registerAIIpc(db: DatabaseManager): void {
     try {
       const result = await aiService.analyzeText(request);
 
-      broadcast('ai.analysis.completed', {
-        mode: 'chat',
-        sessionId: result.sessionId,
-        success: result.success,
-        usage: result.response?.usage,
-        model: result.response?.modelUsed,
-        provider: result.response?.providerUsed,
-      });
+      const outcome = analysisOutcomeEvent('chat', request, result);
+      broadcast(outcome.channel, outcome.payload);
 
       return result;
     } catch (error: any) {
@@ -488,11 +475,14 @@ export function registerAIIpc(db: DatabaseManager): void {
         mode: 'chat',
         sessionId: request.sessionId,
         error: error.message || 'Unknown error',
+        errorCode: error.code,
       });
 
       return {
         success: false,
+        sessionId: request.sessionId,
         error: error.message || 'Unknown error',
+        errorCode: error.code,
       };
     }
   });
@@ -525,16 +515,58 @@ export function registerAIIpc(db: DatabaseManager): void {
     }));
   });
 
+  const mapMessage = (m: AIMessageRow) => ({
+    id: m.id,
+    sessionId: m.session_id,
+    role: m.role,
+    content: m.content,
+    recognizedText: m.recognized_text || undefined,
+    createdAt: m.created_at,
+    providerId: m.provider_id || undefined,
+    modelName: m.model_name || undefined,
+    durationMs: m.duration_ms ?? undefined,
+    tokensIn: m.tokens_in ?? undefined,
+    tokensOut: m.tokens_out ?? undefined,
+  });
+
   ipcMain.handle('ai.getMessages', async (_event, sessionId: number) => {
-    const messages = db.getAIMessages(sessionId);
-    return messages.map((m) => ({
-      id: m.id,
-      sessionId: m.session_id,
-      role: m.role,
-      content: m.content,
-      recognizedText: m.recognized_text || undefined,
-      createdAt: m.created_at,
-    }));
+    return db.getAIMessages(sessionId).map(mapMessage);
+  });
+
+  /**
+   * One consistent snapshot of a conversation for the chat: header data, messages with
+   * their model/time metadata and — if the last attempt failed and nothing answered it
+   * since — that failure, so a chat opened after the error still shows it.
+   */
+  ipcMain.handle('ai.getConversation', async (_event, sessionId: number) => {
+    const session = db.getAISessionById(sessionId);
+    if (!session) return null;
+    const rows = db.getAIMessages(sessionId);
+    const conversation = rows.filter((m) => m.role !== 'system');
+    const lastMessage = conversation[conversation.length - 1];
+    const lastRun = db.getLastAIRun(sessionId);
+    const lastError =
+      lastRun && lastRun.status === 'error' && lastMessage?.role === 'user' && lastRun.created_at >= lastMessage.created_at
+        ? {
+            code: lastRun.error_code || undefined,
+            message: lastRun.error_message_redacted || undefined,
+            at: lastRun.created_at,
+            providerId: lastRun.provider_id,
+            modelName: lastRun.model_name,
+          }
+        : null;
+    return {
+      session: {
+        id: session.id,
+        title: session.title || null,
+        providerId: session.providerId,
+        modelName: session.modelName,
+        screenshotId: session.screenshotId,
+        createdAt: session.createdAt,
+      },
+      messages: rows.map(mapMessage),
+      lastError,
+    };
   });
 
   ipcMain.handle('ai.createSession', async (_event, screenshotId: number) => {

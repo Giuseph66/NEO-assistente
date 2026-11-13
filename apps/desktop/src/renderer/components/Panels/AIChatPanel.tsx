@@ -8,6 +8,14 @@ import {
 } from '@neo/shared';
 import { GeminiIcon, OpenAIIcon, OllamaIcon, ProviderIcon, ClaudeIcon } from '../Icons';
 import { useSharedInputValue } from '../../store/sharedInputStore';
+import {
+  ChatErrorInfo,
+  describeChatError,
+  formatDuration,
+  formatTokens,
+  prettyModelName,
+  providerLabel,
+} from '../../../common/chat';
 
 interface Message {
   id: string;
@@ -17,7 +25,32 @@ interface Message {
   imagePath?: string;
   imageBase64?: string;
   screenshotId?: number;
+  /** The built-in greeting of an empty chat: not a stored message (no time, model or copy). */
+  isWelcome?: boolean;
+  /** Answers: which provider/model produced it and how long it took. */
+  providerId?: string;
+  modelName?: string;
+  durationMs?: number;
+  tokensIn?: number;
+  tokensOut?: number;
 }
+
+type ChatFailure = { code?: string; message?: string; at: number; modelName?: string };
+
+const timeOf = (ts: number) =>
+  new Date(ts).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+const dayKey = (ts: number) => new Date(ts).toDateString();
+
+const dayLabel = (ts: number) => {
+  const date = new Date(ts);
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  if (date.toDateString() === today.toDateString()) return 'Hoje';
+  if (date.toDateString() === yesterday.toDateString()) return 'Ontem';
+  return date.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
+};
 
 interface AIChatPanelProps {
   sessionId?: number | null;
@@ -51,6 +84,18 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
   const [currentSessionId, setCurrentSessionId] = useState<number | null>(sessionId || null);
   const currentSessionIdRef = useRef<number | null>(sessionId || null);
   const suppressStartedRef = useRef<{ prompt: string; sessionId: number | null } | null>(null);
+  // Conversation header, the model that will answer next, and the last failure (shown in the thread)
+  const [conversationInfo, setConversationInfo] = useState<{ title: string | null; createdAt: number } | null>(null);
+  const [currentModelName, setCurrentModelName] = useState<string>('');
+  const [chatError, setChatError] = useState<ChatFailure | null>(null);
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState('');
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [typingSince, setTypingSince] = useState<number | null>(null);
+  const [typingElapsed, setTypingElapsed] = useState(0);
+  // A slow getMessages answering after a newer one must not overwrite it (session switches, retries)
+  const loadSeqRef = useRef(0);
+  const loadRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const partialStateRef = useRef({ mic: '', micAt: 0, system: '', systemAt: 0 });
   const inputResizeRef = useRef<number | null>(null);
 
@@ -76,16 +121,48 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
         role: msg.role,
         content: msg.content || '',
         timestamp: msg.createdAt || Date.now(),
+        providerId: msg.providerId,
+        modelName: msg.modelName,
+        durationMs: msg.durationMs,
+        tokensIn: msg.tokensIn,
+        tokensOut: msg.tokensOut,
       }));
 
+  /**
+   * Loads one consistent snapshot of the conversation (messages with model/time, title and
+   * the last failure, if nothing answered it since). Only the latest call may apply its result.
+   */
   const loadSessionMessages = async (targetSessionId: number, attempt: number = 0) => {
     if (!window.ai?.getMessages) return;
+    if (attempt === 0) {
+      if (loadRetryTimerRef.current) clearTimeout(loadRetryTimerRef.current);
+      loadRetryTimerRef.current = null;
+    }
+    const seq = ++loadSeqRef.current;
     try {
-      const rows = await window.ai.getMessages(targetSessionId);
-      const mapped = mapMessages(Array.isArray(rows) ? rows : []);
+      let rows: any[] = [];
+      let info: { title: string | null; createdAt: number } | null = null;
+      let failure: ChatFailure | null = null;
+      const conversation = window.ai.getConversation ? await window.ai.getConversation(targetSessionId) : null;
+      if (conversation) {
+        rows = conversation.messages;
+        info = { title: conversation.session.title, createdAt: conversation.session.createdAt };
+        failure = conversation.lastError
+          ? { code: conversation.lastError.code, message: conversation.lastError.message, at: conversation.lastError.at, modelName: conversation.lastError.modelName }
+          : null;
+      } else {
+        const legacy = await window.ai.getMessages(targetSessionId);
+        rows = Array.isArray(legacy) ? legacy : [];
+      }
+      if (seq !== loadSeqRef.current) return; // a newer load (or session switch) took over
+
+      const mapped = mapMessages(rows);
       setMessages(mapped);
+      setConversationInfo(info);
+      // A failure shows only while it is the last thing that happened; a running request clears it
+      setChatError((previous) => failure ?? (previous && previous.at > (mapped[mapped.length - 1]?.timestamp ?? 0) ? previous : null));
       if (mapped.length === 0 && attempt < 3) {
-        setTimeout(() => loadSessionMessages(targetSessionId, attempt + 1), 200);
+        loadRetryTimerRef.current = setTimeout(() => loadSessionMessages(targetSessionId, attempt + 1), 200);
       }
     } catch (error) {
       console.error('Failed to load session messages:', error);
@@ -108,7 +185,7 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages]);
+  }, [messages, chatError, isTyping]);
 
   useEffect(() => {
     if (inputResizeRef.current) {
@@ -131,14 +208,23 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
   }, [currentSessionId]);
 
   useEffect(() => {
+    // Invalidate in-flight loads of the previous conversation and update the ref right away:
+    // events can arrive before React has re-rendered with the new id.
+    loadSeqRef.current += 1;
+    if (loadRetryTimerRef.current) clearTimeout(loadRetryTimerRef.current);
+    currentSessionIdRef.current = sessionId || null;
+    setChatError(null);
+    setIsEditingTitle(false);
     if (sessionId) {
       setCurrentSessionId(sessionId);
+      setConversationInfo(null);
       loadSessionMessages(sessionId);
       return;
     }
     setCurrentSessionId(null);
+    setConversationInfo(null);
     setMessages([
-      { id: '1', role: 'assistant', content: 'Olá! Como posso ajudar você hoje?', timestamp: Date.now() }
+      { id: 'welcome', role: 'assistant', content: 'Olá! Como posso ajudar você hoje?', timestamp: Date.now(), isWelcome: true }
     ]);
   }, [sessionId]);
 
@@ -155,6 +241,9 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
           const config = await window.ai.getConfig();
           if (config?.providerId && config.providerId !== currentProviderId) {
             setCurrentProviderId(config.providerId);
+          }
+          if (config?.modelName) {
+            setCurrentModelName((previous) => (previous === config.modelName ? previous : config.modelName));
           }
         } catch (error) {
           console.error('Failed to update provider:', error);
@@ -186,6 +275,9 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
         const config = await window.ai.getConfig();
         if (config?.providerId) {
           setCurrentProviderId(config.providerId);
+        }
+        if (config?.modelName) {
+          setCurrentModelName(config.modelName);
         }
       }
     } catch (error) {
@@ -230,6 +322,10 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
   useEffect(() => {
     if (!window.ai) return;
 
+    // Does an event about `eventSessionId` concern the conversation on screen?
+    const concernsCurrent = (eventSessionId: number | null | undefined) =>
+      !currentSessionIdRef.current || !eventSessionId || eventSessionId === currentSessionIdRef.current;
+
     const offStarted = window.ai.onAnalysisStarted((event: any) => {
       setIsLoading(true);
       setProgress(20);
@@ -237,7 +333,12 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
 
       const eventSessionId = typeof event.sessionId === 'number' ? event.sessionId : null;
       if (eventSessionId && !currentSessionIdRef.current) {
+        currentSessionIdRef.current = eventSessionId;
         setCurrentSessionId(eventSessionId);
+      }
+      if (concernsCurrent(eventSessionId)) {
+        setChatError(null); // a new attempt replaces the previous failure
+        setIsTyping(true);
       }
 
       const suppress = suppressStartedRef.current;
@@ -246,7 +347,7 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
         return;
       }
 
-      if (typeof event.prompt === 'string' && event.prompt.trim()) {
+      if (typeof event.prompt === 'string' && event.prompt.trim() && concernsCurrent(eventSessionId)) {
         const pendingMessage: Message = {
           id: `pending-${Date.now()}`,
           role: 'user',
@@ -255,8 +356,6 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
         };
         setMessages((prev) => [...prev, pendingMessage]);
       }
-
-      setIsTyping(true);
     });
 
     const offCompleted = window.ai.onAnalysisCompleted((event: any) => {
@@ -268,9 +367,11 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
       setIsTyping(false);
       if (event?.mode === 'chat' && event.sessionId) {
         if (!currentSessionIdRef.current) {
+          currentSessionIdRef.current = event.sessionId;
           setCurrentSessionId(event.sessionId);
         }
-        if (!currentSessionIdRef.current || event.sessionId === currentSessionIdRef.current) {
+        if (event.sessionId === currentSessionIdRef.current) {
+          setChatError(null);
           loadSessionMessages(event.sessionId);
         }
       }
@@ -280,15 +381,60 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
       setIsLoading(false);
       setProgress(0);
       setIsTyping(false);
+
+      if (event?.mode === 'chat' || event?.mode === 'screenshot') {
+        // Failures arrive with the conversation id and the reason: show them in the thread
+        // (this used to be dropped, so a failed answer looked like "nothing happened").
+        const eventSessionId = typeof event.sessionId === 'number' ? event.sessionId : null;
+        if (event.mode === 'chat' && !currentSessionIdRef.current && eventSessionId) {
+          currentSessionIdRef.current = eventSessionId;
+          setCurrentSessionId(eventSessionId);
+        }
+        // A screenshot analysis started elsewhere only matters here if it is this conversation.
+        const concerns = event.mode === 'chat' ? concernsCurrent(eventSessionId) : !!eventSessionId && eventSessionId === currentSessionIdRef.current;
+        if (concerns) {
+          setChatError({ code: event.errorCode, message: event.error, at: Date.now() });
+          const target = eventSessionId ?? currentSessionIdRef.current;
+          if (target) loadSessionMessages(target); // the user's message is stored even though the answer failed
+        }
+        return;
+      }
       setSttError(event.error || 'Erro ao processar mensagem');
     });
+
+    const offSessionUpdated = (() => {
+      const ipc = (window as any).electron?.ipcRenderer;
+      if (!ipc?.on) return () => undefined;
+      const handler = (_event: any, payload: { sessionId: number; title: string | null }) => {
+        if (payload?.sessionId === currentSessionIdRef.current) {
+          setConversationInfo((previous) => (previous ? { ...previous, title: payload.title } : previous));
+        }
+      };
+      ipc.on('session:updated', handler);
+      return () => ipc.removeListener?.('session:updated', handler);
+    })();
 
     return () => {
       offStarted();
       offCompleted();
       offError();
+      offSessionUpdated();
+      if (loadRetryTimerRef.current) clearTimeout(loadRetryTimerRef.current);
     };
   }, []);
+
+  // "Respondendo há 12 s": the request is running, say so (CLI-based providers take a few seconds)
+  useEffect(() => {
+    if (!isTyping) {
+      setTypingSince(null);
+      setTypingElapsed(0);
+      return;
+    }
+    const startedAt = Date.now();
+    setTypingSince(startedAt);
+    const timer = setInterval(() => setTypingElapsed(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [isTyping]);
 
   // Load system audio sources
   const loadSystemSources = async () => {
@@ -846,38 +992,76 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
         });
       }
 
-      if (result.success && result.response) {
-        // Update session ID if new
-        if (result.sessionId && !currentSessionId) {
-          setCurrentSessionId(result.sessionId);
-        }
-
-        const responseText = result.response.answerText || 'Processado com sucesso.';
-        const aiResponse: Message = {
-          id: (Date.now() + 1).toString(),
-          role: 'assistant',
-          content: responseText,
-          timestamp: Date.now()
-        };
-        setMessages(prev => [...prev, aiResponse]);
-      } else {
-        throw new Error(result.error || 'Falha ao processar mensagem');
+      const resultSessionId = result.sessionId || currentSessionIdRef.current;
+      if (result.sessionId && !currentSessionIdRef.current) {
+        currentSessionIdRef.current = result.sessionId;
+        setCurrentSessionId(result.sessionId);
       }
+      if (!result.success) {
+        // The failure is shown in the thread (the user's message is already saved).
+        setChatError({ code: (result as any).errorCode, message: result.error || 'Falha ao processar mensagem', at: Date.now() });
+      }
+      // Reload from the database so the answer carries its model, time and tokens
+      if (resultSessionId) await loadSessionMessages(resultSessionId);
     } catch (error: any) {
       console.error('Error sending message:', error);
-      const errorResponse: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: `❌ Erro: ${error.message || 'Erro desconhecido ao processar mensagem'}`,
-        timestamp: Date.now()
-      };
-      setMessages(prev => [...prev, errorResponse]);
+      setChatError({ message: error?.message || 'Erro desconhecido ao processar mensagem', at: Date.now() });
       setSttError(error.message || 'Erro ao enviar mensagem');
     } finally {
       setIsTyping(false);
       setProgress(100);
       setTimeout(() => setProgress(0), 300);
       suppressStartedRef.current = null;
+    }
+  };
+
+  /** Ask for the answer to the last message again, without adding another user message. */
+  const handleRetry = async () => {
+    const target = currentSessionIdRef.current;
+    if (!target || isTyping || !window.ai) return;
+    setChatError(null);
+    setIsTyping(true);
+    try {
+      const result = await window.ai.analyzeText({ prompt: '', regenerate: true, sessionId: target });
+      if (!result.success) {
+        setChatError({ code: (result as any).errorCode, message: result.error, at: Date.now() });
+      }
+      await loadSessionMessages(result.sessionId || target);
+    } catch (error: any) {
+      setChatError({ message: error?.message || 'Erro ao tentar novamente', at: Date.now() });
+    } finally {
+      setIsTyping(false);
+    }
+  };
+
+  const startEditingTitle = () => {
+    if (!currentSessionIdRef.current) return;
+    setTitleDraft(conversationInfo?.title || '');
+    setIsEditingTitle(true);
+  };
+
+  const commitTitle = async () => {
+    setIsEditingTitle(false);
+    const target = currentSessionIdRef.current;
+    const next = titleDraft.trim();
+    if (!target || next === (conversationInfo?.title || '')) return;
+    try {
+      const result = await (window as any).electron.ipcRenderer.invoke('session:rename', { sessionId: target, title: next });
+      if (result?.success) {
+        setConversationInfo((previous) => (previous ? { ...previous, title: result.title } : previous));
+      }
+    } catch (error) {
+      console.error('Failed to rename conversation:', error);
+    }
+  };
+
+  const copyMessage = async (message: Message) => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopiedMessageId(message.id);
+      setTimeout(() => setCopiedMessageId((current) => (current === message.id ? null : current)), 1500);
+    } catch (error) {
+      console.error('Failed to copy message:', error);
     }
   };
 
@@ -888,28 +1072,110 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
     }
   };
 
+  const failureInfo: ChatErrorInfo | null = chatError ? describeChatError(chatError.code, chatError.message) : null;
+  const realMessages = messages;
+  const headerTitle = conversationInfo?.title || (currentSessionId ? `Conversa #${currentSessionId}` : 'Nova conversa');
+
   return (
     <div className="ai-chat-panel">
-      <div className="messages-container">
-        {messages.map((msg) => (
-          <div key={msg.id} className={`message-row ${msg.role}`}>
-            <div className="message-bubble">
-              {msg.role === 'assistant' && (
-                <div className="avatar">
-                  {getProviderIcon(currentProviderId)}
-                </div>
-              )}
-              <div className="message-content">
-                {msg.imageBase64 && (
-                  <div className="message-image">
-                    <img src={msg.imageBase64} alt="Screenshot" />
-                  </div>
-                )}
-                {msg.content && <div>{msg.content}</div>}
-              </div>
-            </div>
+      <header className="chat-header">
+        <div className="chat-header-icon">{getProviderIcon(currentProviderId)}</div>
+        <div className="chat-header-text">
+          {isEditingTitle ? (
+            <input
+              className="chat-title-input"
+              autoFocus
+              value={titleDraft}
+              maxLength={120}
+              placeholder="Assunto da conversa"
+              onChange={(e) => setTitleDraft(e.target.value)}
+              onBlur={commitTitle}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') commitTitle();
+                if (e.key === 'Escape') setIsEditingTitle(false);
+              }}
+            />
+          ) : (
+            <button
+              className="chat-title"
+              onClick={startEditingTitle}
+              disabled={!currentSessionId}
+              title={currentSessionId ? 'Clique para renomear a conversa' : undefined}
+            >
+              {headerTitle}
+              {currentSessionId && <span className="chat-title-edit" aria-hidden="true">✎</span>}
+            </button>
+          )}
+          <div className="chat-subtitle">
+            {currentSessionId && <span>#{currentSessionId}</span>}
+            {conversationInfo && (
+              <span>
+                {new Date(conversationInfo.createdAt).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' })} às {timeOf(conversationInfo.createdAt)}
+              </span>
+            )}
+            {currentSessionId && <span>{messages.length} {messages.length === 1 ? 'mensagem' : 'mensagens'}</span>}
           </div>
-        ))}
+        </div>
+        {currentModelName && (
+          <div className="chat-model-chip" title="Modelo que responderá a próxima mensagem">
+            <span className="chat-model-name">{prettyModelName(currentModelName)}</span>
+            <span className="chat-model-provider">{providerLabel(currentProviderId)}</span>
+          </div>
+        )}
+      </header>
+
+      <div className="messages-container">
+        {realMessages.map((msg, index) => {
+          const previous = realMessages[index - 1];
+          const newDay = !msg.isWelcome && (!previous || previous.isWelcome || dayKey(previous.timestamp) !== dayKey(msg.timestamp));
+          const answeredBy = msg.role === 'assistant' ? msg.providerId || currentProviderId : currentProviderId;
+          const hasMeta = msg.role === 'assistant' && (msg.modelName || msg.durationMs);
+          return (
+            <React.Fragment key={msg.id}>
+              {newDay && <div className="day-separator"><span>{dayLabel(msg.timestamp)}</span></div>}
+              <div className={`message-row ${msg.role}`}>
+                <div className="message-bubble">
+                  {msg.role === 'assistant' && (
+                    <div className="avatar">
+                      {getProviderIcon(answeredBy)}
+                    </div>
+                  )}
+                  <div className="message-main">
+                    <div className="message-content">
+                      {msg.imageBase64 && (
+                        <div className="message-image">
+                          <img src={msg.imageBase64} alt="Screenshot" />
+                        </div>
+                      )}
+                      {msg.content && <div>{msg.content}</div>}
+                    </div>
+                    {!msg.isWelcome && (
+                    <div className="message-meta">
+                      {msg.role === 'assistant' && msg.modelName && (
+                        <span className="meta-model" title={`${providerLabel(msg.providerId)} · ${msg.modelName}`}>
+                          {prettyModelName(msg.modelName)}
+                        </span>
+                      )}
+                      <span className="meta-time" title={new Date(msg.timestamp).toLocaleString('pt-BR')}>{timeOf(msg.timestamp)}</span>
+                      {hasMeta && msg.durationMs ? <span className="meta-duration">{formatDuration(msg.durationMs)}</span> : null}
+                      {msg.role === 'assistant' && msg.tokensOut ? (
+                        <span className="meta-tokens" title={`${msg.tokensIn ?? '?'} tokens de entrada · ${msg.tokensOut} de saída`}>
+                          {formatTokens(msg.tokensOut)} tokens
+                        </span>
+                      ) : null}
+                      {msg.role === 'assistant' && msg.content && (
+                        <button className="meta-copy" onClick={() => copyMessage(msg)} title="Copiar resposta">
+                          {copiedMessageId === msg.id ? 'Copiado ✓' : 'Copiar'}
+                        </button>
+                      )}
+                    </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </React.Fragment>
+          );
+        })}
         {isTyping && (
           <div className="message-row assistant">
             <div className="message-bubble typing">
@@ -918,6 +1184,36 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
               </div>
               <div className="typing-dots">
                 <span>.</span><span>.</span><span>.</span>
+              </div>
+              <span className="typing-label">
+                {currentModelName ? `${prettyModelName(currentModelName)} está respondendo` : 'Respondendo'}
+                {typingElapsed >= 3 ? ` · ${typingElapsed} s` : ''}
+              </span>
+            </div>
+          </div>
+        )}
+        {failureInfo && chatError && !isTyping && (
+          <div className="message-row assistant">
+            <div className={`chat-error-card ${failureInfo.kind}`} role="alert">
+              <div className="chat-error-title">
+                <span className="chat-error-icon" aria-hidden="true">⚠</span>
+                {failureInfo.title}
+              </div>
+              <div className="chat-error-meta">
+                {chatError.modelName ? `${prettyModelName(chatError.modelName)} · ` : ''}
+                {timeOf(chatError.at)}
+              </div>
+              {failureInfo.detail && (
+                <details className="chat-error-details">
+                  <summary>Detalhes</summary>
+                  <pre>{failureInfo.detail}</pre>
+                </details>
+              )}
+              <div className="chat-error-actions">
+                {failureInfo.retryable && currentSessionId && (
+                  <button className="chat-error-btn primary" onClick={handleRetry}>Tentar novamente</button>
+                )}
+                <button className="chat-error-btn" onClick={() => setChatError(null)}>Dispensar</button>
               </div>
             </div>
           </div>

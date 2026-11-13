@@ -1,3 +1,5 @@
+import { prettyModelName } from '../../common/chat';
+
 export type ModelOption = { label: string; value: string };
 
 /** Real model ids are lowercase with no spaces (`gpt-6.1-sol`); legacy labels ("GPT-5.2 Standard") are not. */
@@ -8,18 +10,7 @@ export const isModelId = (value: string | null | undefined): value is string =>
 export const pickStoredModel = (stored: string | null | undefined, fallbackId: string): string =>
     isModelId(stored) ? stored : fallbackId;
 
-/** `gpt-6.1-sol` → `GPT-6.1 Sol`, `claude-opus-5-5` → `Claude Opus 5.5`, `gemini-2.5-flash` → `Gemini 2.5 Flash`. */
-export function prettyModelName(id: string): string {
-    const parts = id
-        .replace(/(?<!\d)(\d)-(\d)(?!\d)/g, '$1.$2')
-        .split('-')
-        .filter(Boolean);
-    const cap = (word: string) => (/^[a-z]/.test(word) ? word[0].toUpperCase() + word.slice(1) : word);
-    if (parts[0] === 'gpt') {
-        return ['GPT', [parts[1], ...parts.slice(2).map(cap)].filter(Boolean).join(' ')].filter(Boolean).join('-');
-    }
-    return parts.map(cap).join(' ');
-}
+export { prettyModelName };
 
 /**
  * Dropdown options for a list of model ids: the id is the value, the catalog name (or a

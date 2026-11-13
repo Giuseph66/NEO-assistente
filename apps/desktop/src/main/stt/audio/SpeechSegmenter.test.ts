@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { SpeechSegmenter } from './SpeechSegmenter';
-import { silence, tone } from '../../testing/fixtures';
+import { continuousSpeech, silence, tone } from '../../testing/fixtures';
 
 const SR = 16000;
 
@@ -74,5 +74,34 @@ describe('SpeechSegmenter', () => {
     expect(segments.length).toBeGreaterThanOrEqual(2);
     const longest = Math.max(...segments.map((s) => s.endMs - s.startMs));
     expect(longest).toBeLessThan(3000);
+  });
+
+  it('cuts long continuous audio at the quietest recent frame, not mid-word', () => {
+    // 2.6 s words with 120 ms quiet gaps: no pause reaches silenceMs, so the cap applies
+    const segments = run(new SpeechSegmenter({ sampleRate: SR, maxSegmentMs: 6000, silenceMs: 400 }), [
+      continuousSpeech(6),
+    ]);
+    expect(segments.length).toBeGreaterThanOrEqual(2);
+    // every cut except the final flush lands inside a gap between words (2600 + k*2720 .. +120)
+    for (const s of segments.slice(0, -1)) {
+      const offset = (s.endMs - 2600) % 2720;
+      expect(offset).toBeGreaterThanOrEqual(0);
+      expect(offset).toBeLessThanOrEqual(150);
+      expect(s.endMs - s.startMs).toBeLessThanOrEqual(6000);
+    }
+    // nothing lost or duplicated across cuts
+    for (let i = 1; i < segments.length; i += 1) {
+      expect(segments[i].startMs).toBe(segments[i - 1].endMs);
+    }
+  });
+
+  it('keeps the hard cap when cutSearchMs is 0', () => {
+    const segments = run(new SpeechSegmenter({ sampleRate: SR, maxSegmentMs: 3000, cutSearchMs: 0 }), [
+      continuousSpeech(4),
+    ]);
+    const lengths = segments.map((s) => s.endMs - s.startMs);
+    expect(lengths.length).toBeGreaterThanOrEqual(3);
+    expect(lengths[0]).toBe(3000);
+    expect(lengths.every((l) => l <= 3000)).toBe(true);
   });
 });

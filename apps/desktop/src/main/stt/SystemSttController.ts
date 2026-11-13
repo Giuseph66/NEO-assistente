@@ -3,15 +3,23 @@ import { LiveTranscriptionProviderId, STTConfig, STTFinalEvent, STTPartialEvent,
 import { getLogger } from '@neo/logger';
 import { ModelManager } from './models/ModelManager';
 import { getConfigStore } from '../storage/configStore';
-import { SystemAudioCapture } from '../audio/system/SystemAudioCapture';
+import type { SystemAudioCaptureLike } from '../audio/system/SystemAudioCapture';
+import { getSystemAudioHub } from '../audio/system/SystemAudioHub';
 import { createLiveTranscriptionProvider, normalizeLiveProviderId } from './providers/LiveProviderRegistry';
-import type { LiveTranscriptionError, LiveTranscriptionProvider } from './providers/LiveTranscriptionProvider';
+import {
+  SYSTEM_AUDIO_SEGMENTATION,
+  type LiveTranscriptionError,
+  type LiveTranscriptionProvider,
+} from './providers/LiveTranscriptionProvider';
 import { DatabaseManager } from '../database';
 import { ApiKeyPool } from '../ai/ApiKeyPool';
 import { getKeyStorage } from '../ai/AIServiceManager';
 import { getOAuthController } from '../auth/openaiOAuth';
 
 const logger = getLogger();
+
+/** Provider error codes after which the provider will not transcribe anything else. */
+const FATAL_PROVIDER_CODES = new Set(['not_connected', 'unauthorized', 'forbidden']);
 
 type StartOptions = {
   sourceId: string;
@@ -24,7 +32,10 @@ export class SystemSttController {
   private modelManager: ModelManager;
   private configStore = getConfigStore();
   private db: DatabaseManager | null = null;
-  private audioSource: SystemAudioCapture | null = null;
+  private audioSource: SystemAudioCaptureLike | null = null;
+  /** Set while tearing down after an error, so provider status updates don't hide the error. */
+  private suppressProviderStatus = false;
+  private cleanupPromise: Promise<void> | null = null;
   private level = 0;
   private lastLevelAt = 0;
 
@@ -41,6 +52,9 @@ export class SystemSttController {
     if (this.status.state === 'listening' || this.status.state === 'running' || this.status.state === 'starting') {
       return;
     }
+    // A previous run that failed may still be tearing down.
+    if (this.cleanupPromise || this.provider || this.audioSource) await this.cleanup();
+    this.suppressProviderStatus = false;
     if (!options.sourceId) {
       const message = 'Selecione um dispositivo de audio do sistema';
       this.setStatus({ state: 'error', message });
@@ -93,7 +107,9 @@ export class SystemSttController {
       this.provider = provider;
       provider.onPartial((event) => this.emitter.emit('partial', event));
       provider.onFinal((event) => this.emitter.emit('final', event));
-      provider.onStatus((status) => this.setStatus(status));
+      provider.onStatus((status) => {
+        if (!this.suppressProviderStatus) this.setStatus(status);
+      });
       provider.onError((error) => this.handleError(error));
       provider.onDebug?.((message) => this.emitter.emit('debug', message));
 
@@ -124,23 +140,24 @@ export class SystemSttController {
         modelPath,
         modelName,
         apiKey: apiKey?.key,
+        segmentation: SYSTEM_AUDIO_SEGMENTATION,
       });
 
-      this.audioSource = new SystemAudioCapture();
+      this.audioSource = getSystemAudioHub().createCapture();
       this.level = 0;
       this.lastLevelAt = 0;
       this.audioSource.onData((chunk) => {
         this.updateLevel(chunk);
         this.provider?.pushAudio(chunk);
       });
-      this.audioSource.onError((error) => this.handleError(error.message));
+      this.audioSource.onError((error) => this.handleError(error.message, true));
       await this.audioSource.start({ sourceId: options.sourceId, sampleRate: effectiveConfig.sampleRate });
 
       if (providerId === 'vox' && modelName) {
         this.setStatus({ state: 'listening', modelId: modelName, language: modelLanguage, providerId });
       }
     } catch (error) {
-      this.handleError(error instanceof Error ? error.message : 'Falha ao iniciar STT do sistema');
+      this.handleError(error instanceof Error ? error.message : 'Falha ao iniciar STT do sistema', true);
       await this.cleanup();
     }
   }
@@ -149,12 +166,20 @@ export class SystemSttController {
     if (this.status.state === 'idle' || this.status.state === 'stopping' || this.status.state === 'finalizing') {
       return;
     }
+    if (this.status.state === 'error') {
+      // Release whatever is left (handleError may already have) and clear the error.
+      this.suppressProviderStatus = true;
+      await this.cleanup();
+      this.setStatus({ state: 'idle' });
+      return;
+    }
 
     this.setStatus({ state: 'finalizing', providerId: this.status.providerId });
 
     await this.cleanup();
 
-    if (this.status.state !== 'error') {
+    // cleanup() may have reported an error through the provider/source callbacks.
+    if ((this.status as STTStatus).state !== 'error') {
       this.setStatus({ state: 'idle' });
     }
   }
@@ -200,7 +225,12 @@ export class SystemSttController {
     this.emitter.emit('status', status);
   }
 
-  private handleError(error: LiveTranscriptionError | string): void {
+  /**
+   * Fatal = the pipeline cannot recover by itself: the audio source died, start failed,
+   * or the provider says so (Codex login/permission). Other provider errors (e.g. a
+   * server `error` event mid-session) keep the previous behaviour: report, keep running.
+   */
+  private handleError(error: LiveTranscriptionError | string, fatal = false): void {
     const payload =
       typeof error === 'string'
         ? { message: error }
@@ -208,9 +238,26 @@ export class SystemSttController {
     logger.error({ message: payload.message, debug: payload.debug, providerId: payload.providerId }, 'System STT error');
     this.emitter.emit('error', payload);
     this.setStatus({ state: 'error', message: payload.message, providerId: payload.providerId, debug: payload.debug });
+    const providerFatal =
+      typeof error !== 'string' && !!error.code && FATAL_PROVIDER_CODES.has(error.code);
+    if ((fatal || providerFatal) && (this.provider || this.audioSource)) {
+      // Release capture and provider; otherwise they keep running behind the error state.
+      this.suppressProviderStatus = true;
+      void this.cleanup();
+    }
   }
 
-  private async cleanup(): Promise<void> {
+  /** Single-flight: concurrent callers (stop + error) share one teardown. */
+  private cleanup(): Promise<void> {
+    if (!this.cleanupPromise) {
+      this.cleanupPromise = this.runCleanup().finally(() => {
+        this.cleanupPromise = null;
+      });
+    }
+    return this.cleanupPromise;
+  }
+
+  private async runCleanup(): Promise<void> {
     try {
       await this.audioSource?.stop();
     } catch (error) {

@@ -5,7 +5,8 @@ import { app, shell } from 'electron';
 import { getLogger } from '@neo/logger';
 import { RecordingEntry, RecorderStartOptions, RecorderStatus } from '@neo/shared';
 import { DatabaseManager } from '../../database';
-import { SystemAudioCapture } from '../system/SystemAudioCapture';
+import type { SystemAudioCaptureLike } from '../system/SystemAudioCapture';
+import { getSystemAudioHub } from '../system/SystemAudioHub';
 import { WavWriter } from './WavWriter';
 import { pathToFileURL } from 'url';
 
@@ -19,7 +20,8 @@ const isWithinDir = (baseDir: string, targetPath: string): boolean => {
 
 export class RecorderService {
   private emitter = new EventEmitter();
-  private capture: SystemAudioCapture | null = null;
+  private capture: SystemAudioCaptureLike | null = null;
+  private finishing: Promise<void> | null = null;
   private writer: WavWriter | null = null;
   private status: RecorderStatus = { state: 'idle', bytesWritten: 0 };
   private statsTimer: NodeJS.Timeout | null = null;
@@ -67,6 +69,9 @@ export class RecorderService {
     if (this.status.state === 'recording') {
       return this.status;
     }
+    if (this.finishing) {
+      await this.finishing;
+    }
     if (!options.sourceId) {
       throw new Error('Selecione um dispositivo de audio');
     }
@@ -84,7 +89,7 @@ export class RecorderService {
       throw new Error('Caminho invalido para gravacao');
     }
 
-    this.capture = new SystemAudioCapture();
+    this.capture = getSystemAudioHub().createCapture();
     this.writer = new WavWriter(outputPath, this.sampleRate, this.channels);
     await this.writer.init();
 
@@ -126,51 +131,78 @@ export class RecorderService {
 
   async stop(): Promise<RecorderStatus> {
     if (this.status.state !== 'recording') {
+      // A failed recording was already finalized by handleError.
+      if (this.finishing) await this.finishing;
       return this.status;
     }
 
     this.status = { ...this.status, state: 'stopping' };
     this.emitStatus();
 
-    await this.capture?.stop();
-    this.capture = null;
-    this.stopStatsTimer();
-
-    await this.writer?.finalize();
-
-    const bytes = this.writer?.getBytesWritten() || 0;
-    const durationMs = Math.round((bytes / (this.sampleRate * this.channels * 2)) * 1000);
-    const path = this.currentPath;
-    const sourceId = this.currentSourceId;
-
-    if (path) {
-      try {
-        this.db.saveRecording({
-          path,
-          sourceType: 'system',
-          sourceId: sourceId || null,
-          createdAt: this.startedAt || Date.now(),
-          sampleRate: this.sampleRate,
-          channels: this.channels,
-          bytes,
-          durationMs,
-        });
-      } catch (error) {
-        logger.error({ err: error }, 'Failed to save recording metadata');
-      }
-    }
-
-    this.writer = null;
-    this.startedAt = 0;
-    this.currentPath = null;
-    this.currentSourceId = null;
-    this.level = 0;
-    this.lastLevelAt = 0;
-    this.emitter.emit('level', { level: 0, rms: 0, ts: Date.now() });
+    const path = await this.finish();
     this.status = { state: 'idle', bytesWritten: 0, path: path || undefined };
     this.emitStatus();
 
     return this.status;
+  }
+
+  /** Stops capture and closes the WAV (header + DB entry). Safe to call twice. */
+  private finish(): Promise<string | null> {
+    if (this.finishing) {
+      return this.finishing.then(() => null);
+    }
+    let resultPath: string | null = null;
+    this.finishing = (async () => {
+      const capture = this.capture;
+      this.capture = null;
+      this.stopStatsTimer();
+      try {
+        await capture?.stop();
+      } catch (error) {
+        logger.warn({ err: error }, 'Failed to stop system audio capture');
+      }
+
+      const writer = this.writer;
+      this.writer = null;
+      try {
+        await writer?.finalize();
+      } catch (error) {
+        logger.error({ err: error }, 'Failed to finalize recording');
+      }
+
+      const bytes = writer?.getBytesWritten() || 0;
+      const durationMs = Math.round((bytes / (this.sampleRate * this.channels * 2)) * 1000);
+      const path = this.currentPath;
+      const sourceId = this.currentSourceId;
+
+      if (path && writer) {
+        try {
+          this.db.saveRecording({
+            path,
+            sourceType: 'system',
+            sourceId: sourceId || null,
+            createdAt: this.startedAt || Date.now(),
+            sampleRate: this.sampleRate,
+            channels: this.channels,
+            bytes,
+            durationMs,
+          });
+        } catch (error) {
+          logger.error({ err: error }, 'Failed to save recording metadata');
+        }
+      }
+
+      this.startedAt = 0;
+      this.currentPath = null;
+      this.currentSourceId = null;
+      this.level = 0;
+      this.lastLevelAt = 0;
+      this.emitter.emit('level', { level: 0, rms: 0, ts: Date.now() });
+      resultPath = path;
+    })().finally(() => {
+      this.finishing = null;
+    });
+    return this.finishing.then(() => resultPath);
   }
 
   listRecent(limit: number = 10): RecordingEntry[] {
@@ -220,14 +252,16 @@ export class RecorderService {
   }
 
   private handleError(error: unknown): void {
+    if (this.status.state !== 'recording') return;
     const message = error instanceof Error ? error.message : 'Erro ao gravar';
     logger.error({ err: error }, 'Recorder error');
-    this.status = { state: 'error', bytesWritten: this.status.bytesWritten || 0, message };
+    const bytesWritten = this.writer?.getBytesWritten() || this.status.bytesWritten || 0;
+    const path = this.currentPath || undefined;
+    this.status = { state: 'error', bytesWritten, message, path };
     this.emitter.emit('error', message);
-    this.level = 0;
-    this.lastLevelAt = 0;
-    this.emitter.emit('level', { level: 0, rms: 0, ts: Date.now() });
     this.emitStatus();
+    // Keep what was captured so far: close the WAV and release the capture.
+    void this.finish();
   }
 
   private startStatsTimer(): void {

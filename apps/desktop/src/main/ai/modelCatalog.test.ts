@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { getModelsForProvider, mergeCatalog } from './modelCatalog';
 import { filterOpenAIChatModelIds, OPENAI_CURRENT_MODELS } from './openaiModels';
-import { getPreferredModelNameForProvider, isModelKnownForProvider } from './utils/aiConfigNormalization';
+import { getPreferredModelNameForProvider, isModelKnownForProvider, normalizeAIConfigPatch } from './utils/aiConfigNormalization';
 
 const model = (id: string) => ({ id, name: id, supportsVision: true });
 const catalog = (version: number, providers: Record<string, string[]>) => ({
@@ -72,5 +72,31 @@ describe('OpenAI model lists', () => {
       'gpt-6-luna',
     ]);
     expect(ids).toEqual(['o3', 'gpt-6.1-sol', 'gpt-6-luna', 'gpt-5.6-sol']);
+  });
+});
+
+describe('model normalisation when switching provider', () => {
+  const current = {
+    providerId: 'claude-code' as const,
+    modelName: 'claude-opus-5-5',
+    timeoutMs: 1, retries: 1, streaming: false, saveHistory: true, maxImageDimension: 1, maxImageBytes: 1,
+    imageQuality: 1, enableImageOptimization: true, fallbackMaxAttempts: 1, fallbackCooldownMinutes: 1,
+  };
+
+  it('does not send another vendor\'s model, or a display label, to the Codex CLI', () => {
+    expect(isModelKnownForProvider('codex-cli', 'gpt-6-luna')).toBe(true);
+    expect(isModelKnownForProvider('codex-cli', 'o3')).toBe(true);
+    expect(isModelKnownForProvider('codex-cli', 'claude-opus-5-5')).toBe(false);
+    expect(isModelKnownForProvider('codex-cli', 'GPT-5.2 Standard')).toBe(false);
+    expect(isModelKnownForProvider('codex-cli', 'gpt-5.2 standard')).toBe(false);
+  });
+
+  it('replaces the carried-over model with the provider default (the real session #37 case)', () => {
+    const switched = normalizeAIConfigPatch(current, { providerId: 'codex-cli' });
+    expect(switched.didChangeModel).toBe(true);
+    expect(switched.normalizedPatch.modelName).toBe('gpt-6.1-sol');
+
+    const keepsValid = normalizeAIConfigPatch(current, { providerId: 'codex-cli', modelName: 'gpt-6-luna' });
+    expect(keepsValid.didChangeModel).toBe(false);
   });
 });

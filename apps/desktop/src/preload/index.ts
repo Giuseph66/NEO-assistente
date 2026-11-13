@@ -249,6 +249,7 @@ const aiApi = {
     extractText: (screenshotId: number) => ipcRenderer.invoke('ai.extractText', screenshotId),
     getSessions: (screenshotId: number) => ipcRenderer.invoke('ai.getSessions', screenshotId),
     getMessages: (sessionId: number) => ipcRenderer.invoke('ai.getMessages', sessionId),
+    getConversation: (sessionId: number) => ipcRenderer.invoke('ai.getConversation', sessionId),
     createSession: (screenshotId: number) => ipcRenderer.invoke('ai.createSession', screenshotId),
     savePromptTemplate: (template: any) => ipcRenderer.invoke('ai.savePromptTemplate', template),
     getPromptTemplates: (category?: string) => ipcRenderer.invoke('ai.getPromptTemplates', category),
