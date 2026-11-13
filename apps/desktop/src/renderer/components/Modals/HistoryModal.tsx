@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import './HistoryModal.css';
+import { SessionReportView } from '../Session/SessionReportView';
+import { formatSessionDuration } from '../../hooks/useSessionDetails';
+import type { SessionReport } from '../../../common/sessionReport';
 
 interface HistoryModalProps {
     isOpen: boolean;
@@ -14,6 +17,13 @@ interface Message {
     createdAt: number;
 }
 
+interface TranscriptLine {
+    id: number;
+    source: 'mic' | 'system';
+    text: string;
+    spokenAt: number;
+}
+
 interface Session {
     id: number;
     createdAt: number;
@@ -21,13 +31,22 @@ interface Session {
     providerId: string;
     screenshotId?: number;
     summary?: string;
+    title?: string | null;
+    endedAt?: number | null;
+    hasReport?: boolean;
+    transcriptCount?: number;
+    notes?: string;
+    report?: SessionReport | null;
+    transcript?: TranscriptLine[];
     messages?: Message[];
 }
 
-type HistoryTab = 'overview' | 'chat' | 'screenshots' | 'notes';
+type HistoryTab = 'overview' | 'chat' | 'transcript' | 'notes';
 
 export const HistoryModal: React.FC<HistoryModalProps> = ({ isOpen, onClose }) => {
-    const [activeTab, setActiveTab] = useState<HistoryTab>('chat');
+    const [activeTab, setActiveTab] = useState<HistoryTab>('overview');
+    const [reportBusy, setReportBusy] = useState(false);
+    const [reportError, setReportError] = useState<string | null>(null);
     const [sessions, setSessions] = useState<Session[]>([]);
     const [searchTerm, setSearchTerm] = useState('');
     const [selectedSession, setSelectedSession] = useState<Session | null>(null);
@@ -63,9 +82,10 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({ isOpen, onClose }) =
         if (!isOpen) return;
         setIsLoading(true);
         try {
-            const result = await window.electron.ipcRenderer.invoke('session:list', { 
-                date: Date.now(),
-                search: searchQuery 
+            // All recent sessions (not only today's): reports must stay reachable.
+            const result = await window.electron.ipcRenderer.invoke('session:list-recent', {
+                limit: 200,
+                search: searchQuery
             });
             setSessions(result || []);
             
@@ -83,6 +103,7 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({ isOpen, onClose }) =
 
     const handleSessionSelect = async (session: Session) => {
         setSelectedSession(session);
+        setReportError(null);
         setIsDetailsLoading(true);
         try {
             const details = await window.electron.ipcRenderer.invoke('session:get', session.id);
@@ -134,7 +155,47 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({ isOpen, onClose }) =
         }
     }, [isOpen]);
 
+    // Keep the selected session fresh (report finished, notes saved, session ended).
+    useEffect(() => {
+        if (!isOpen) return;
+        const bridge = window.electron?.ipcRenderer;
+        const onUpdated = (_e: unknown, payload: { sessionId?: number }) => {
+            if (!payload?.sessionId) return;
+            if (selectedSession?.id === payload.sessionId) {
+                window.electron.ipcRenderer.invoke('session:get', payload.sessionId).then((details: Session | null) => {
+                    if (details) setSelectedSession(details);
+                });
+            }
+        };
+        bridge?.on('session:updated', onUpdated);
+        return () => bridge?.removeListener('session:updated', onUpdated);
+    }, [isOpen, selectedSession?.id]);
+
     if (!isOpen) return null;
+
+    const generateReport = async (sessionId: number) => {
+        setReportBusy(true);
+        setReportError(null);
+        try {
+            const result = await window.electron.ipcRenderer.invoke('session:report-generate', sessionId);
+            if (!result?.success) {
+                setReportError(result?.error || 'Falha ao gerar o relatório');
+                return;
+            }
+            const details = await window.electron.ipcRenderer.invoke('session:get', sessionId);
+            if (details) setSelectedSession(details);
+            setSessions((prev) => prev.map((s) => (s.id === sessionId ? { ...s, hasReport: true, title: details?.title ?? s.title } : s)));
+        } finally {
+            setReportBusy(false);
+        }
+    };
+
+    const openInSessionPanel = (sessionId: number) => {
+        window.electron.ipcRenderer.send('session:activate', sessionId);
+        window.electron.ipcRenderer.send('window:open-session');
+    };
+
+    const sessionLabel = (session: Session) => session.title || `Sessão #${session.id}`;
 
     const renderMessageIcon = (role: string) => {
         if (role === 'user') {
@@ -165,34 +226,88 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({ isOpen, onClose }) =
         }
 
         switch (activeTab) {
-            case 'overview':
+            case 'overview': {
+                const duration = formatSessionDuration(selectedSession.createdAt, selectedSession.endedAt);
+                const messageCount = selectedSession.messages?.filter((m) => m.role !== 'system').length || 0;
                 return (
                     <div className="history-tab-content">
                         <div className="overview-stats">
                             <div className="stat-card">
-                                <span className="stat-value">{selectedSession.messages?.length || 0}</span>
+                                <span className="stat-value">{selectedSession.endedAt ? 'Encerrada' : 'Em andamento'}</span>
+                                <span className="stat-label">{duration ? `Duração ${duration}` : 'Status'}</span>
+                            </div>
+                            <div className="stat-card">
+                                <span className="stat-value">{selectedSession.transcript?.length || 0}</span>
+                                <span className="stat-label">Falas transcritas</span>
+                            </div>
+                            <div className="stat-card">
+                                <span className="stat-value">{messageCount}</span>
                                 <span className="stat-label">Mensagens</span>
-                            </div>
-                            <div className="stat-card">
-                                <span className="stat-value">{selectedSession.providerId}</span>
-                                <span className="stat-label">Provider</span>
-                            </div>
-                            <div className="stat-card">
-                                <span className="stat-value">{selectedSession.modelName}</span>
-                                <span className="stat-label">Modelo</span>
                             </div>
                         </div>
 
-                        <div className="summary-card">
-                            <h3>Resumo da Sessão</h3>
-                            <p>
-                                {selectedSession.summary || 'Nenhum resumo disponível para esta sessão.'}
-                            </p>
-                            <div style={{ marginTop: '20px', fontSize: '12px', color: '#64748b' }}>
-                                ID da Sessão: #{selectedSession.id}<br/>
-                                Criada em: {new Date(selectedSession.createdAt).toLocaleString()}
-                            </div>
+                        <div className="history-report-actions">
+                            <button className="history-action-btn" onClick={() => openInSessionPanel(selectedSession.id)}>
+                                Abrir no painel
+                            </button>
+                            <button
+                                className="history-action-btn primary"
+                                onClick={() => generateReport(selectedSession.id)}
+                                disabled={reportBusy}
+                            >
+                                {reportBusy ? 'Gerando relatório…' : selectedSession.report ? 'Atualizar relatório' : 'Gerar relatório'}
+                            </button>
                         </div>
+                        {reportError && <div className="history-report-error">{reportError}</div>}
+
+                        {selectedSession.report ? (
+                            <SessionReportView report={selectedSession.report} sessionTitle={selectedSession.title} compact />
+                        ) : (
+                            <div className="summary-card">
+                                <h3>Resumo da Sessão</h3>
+                                <p>
+                                    {selectedSession.summary || 'Nenhum relatório ainda. Gere um para ver resumo, pontos principais, decisões, próximos passos e pontuações.'}
+                                </p>
+                            </div>
+                        )}
+                        <div style={{ marginTop: '16px', fontSize: '12px', color: '#64748b' }}>
+                            ID da Sessão: #{selectedSession.id} · {selectedSession.modelName}<br />
+                            Criada em: {new Date(selectedSession.createdAt).toLocaleString()}
+                            {selectedSession.endedAt ? ` · Encerrada em: ${new Date(selectedSession.endedAt).toLocaleString()}` : ''}
+                        </div>
+                    </div>
+                );
+            }
+            case 'transcript':
+                return (
+                    <div className="history-tab-content">
+                        {selectedSession.transcript && selectedSession.transcript.length > 0 ? (
+                            <div className="history-transcript">
+                                {selectedSession.transcript.map((line) => (
+                                    <div key={line.id} className={`history-transcript-line source-${line.source}`}>
+                                        <span className="speaker">{line.source === 'mic' ? 'Você' : 'Sistema'}</span>
+                                        <span className="time">{new Date(line.spokenAt).toLocaleTimeString('pt-BR')}</span>
+                                        <span className="text">{line.text}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <div className="empty-state">
+                                <p>Nenhuma transcrição de áudio nesta sessão.</p>
+                            </div>
+                        )}
+                    </div>
+                );
+            case 'notes':
+                return (
+                    <div className="history-tab-content">
+                        {selectedSession.notes?.trim() ? (
+                            <div className="history-notes">{selectedSession.notes}</div>
+                        ) : (
+                            <div className="empty-state">
+                                <p>Nenhuma nota nesta sessão.</p>
+                            </div>
+                        )}
                     </div>
                 );
             case 'chat':
@@ -269,10 +384,13 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({ isOpen, onClose }) =
                                         onClick={() => handleSessionSelect(session)}
                                     >
                                         <div className="session-item-header">
-                                            <span className="provider-name">{session.providerId}</span>
+                                            <span className="provider-name session-title" title={sessionLabel(session)}>{sessionLabel(session)}</span>
                                             <div className="header-actions">
-                                                {isRecentSession(session.createdAt) && (
-                                                    <span className="status-badge">RECENTE</span>
+                                                {!session.endedAt && isRecentSession(session.createdAt) && (
+                                                    <span className="status-badge">ABERTA</span>
+                                                )}
+                                                {session.hasReport && (
+                                                    <span className="status-badge report">RELATÓRIO</span>
                                                 )}
                                                 <button 
                                                     className="delete-session-btn" 
@@ -285,7 +403,9 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({ isOpen, onClose }) =
                                         </div>
                                         <div className="session-item-footer">
                                             <span className="relative-time">{formatTime(session.createdAt)}</span>
-                                            <span className="model-name">{session.modelName}</span>
+                                            <span className="model-name">
+                                                {session.transcriptCount ? `${session.transcriptCount} falas · ` : ''}{session.modelName}
+                                            </span>
                                         </div>
                                     </div>
                                 ))
@@ -306,7 +426,15 @@ export const HistoryModal: React.FC<HistoryModalProps> = ({ isOpen, onClose }) =
                             </button>
                             <button className={`tab-btn ${activeTab === 'chat' ? 'active' : ''}`} onClick={() => setActiveTab('chat')}>
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
-                                Histórico do Chat
+                                Chat
+                            </button>
+                            <button className={`tab-btn ${activeTab === 'transcript' ? 'active' : ''}`} onClick={() => setActiveTab('transcript')}>
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /></svg>
+                                Transcrição
+                            </button>
+                            <button className={`tab-btn ${activeTab === 'notes' ? 'active' : ''}`} onClick={() => setActiveTab('notes')}>
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                                Notas
                             </button>
                         </div>
 

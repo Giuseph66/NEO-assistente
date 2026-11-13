@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { SessionSidebar } from '../Panels/SessionSidebar';
 import { SessionSummary } from '../Panels/SessionSummary';
 import { NotesPanel } from '../Panels/NotesPanel';
+import { useSessionDetails } from '../../hooks/useSessionDetails';
 import './SessionLayout.css';
 
 export interface SessionLayoutProps {
@@ -18,13 +19,37 @@ export const SessionLayout: React.FC<SessionLayoutProps> = ({
     activeSessionId
 }) => {
     const [activeView, setActiveView] = useState<'session' | 'notes' | 'summary'>('session');
+    const [ending, setEnding] = useState(false);
+    const { details, generating, endSession } = useSessionDetails(activeSessionId);
+    const ended = !!details?.endedAt;
 
-    // Ensure we default to session view when a session is active
+    // Show the conversation when the user opens a session (HUD, history). Sessions
+    // created in the background (transcript, notes) keep the tab the user is on.
     useEffect(() => {
-        if (activeSessionId) {
-            setActiveView('session');
+        const bridge = (window as any).electron?.ipcRenderer;
+        if (!bridge) return;
+        const onActivated = (_e: unknown, payload: { sessionId: number | null; reason?: string }) => {
+            if (payload?.sessionId && payload.reason !== 'auto') setActiveView('session');
+        };
+        bridge.on('session:activated', onActivated);
+        return () => bridge.removeListener('session:activated', onActivated);
+    }, []);
+
+    const handleEndSession = async () => {
+        if (!activeSessionId || ending) return;
+        setEnding(true);
+        setActiveView('summary');
+        try {
+            await endSession();
+        } finally {
+            setEnding(false);
         }
-    }, [activeSessionId]);
+    };
+
+    const handleNewSession = () => {
+        (window as any).electron?.ipcRenderer.send('session:activate', null);
+        setActiveView('session');
+    };
 
     const handleMinimize = () => {
         (window as any).electron.ipcRenderer.send('window:minimize');
@@ -64,7 +89,27 @@ export const SessionLayout: React.FC<SessionLayoutProps> = ({
 
                 {/* Center: Session Badge */}
                 <div className="header-center">
-                    {activeSessionId && <span className="session-badge">#{activeSessionId}</span>}
+                    {activeSessionId && (
+                        <span className={`session-badge ${ended ? 'ended' : ''}`} title={details?.title || undefined}>
+                            #{activeSessionId}{ended ? ' · encerrada' : ''}
+                        </span>
+                    )}
+                    {activeSessionId && !ended && (
+                        <button
+                            type="button"
+                            className="session-action end"
+                            onClick={handleEndSession}
+                            disabled={ending || generating}
+                            title="Para a transcrição, encerra a sessão e gera o relatório"
+                        >
+                            {ending ? 'Encerrando…' : 'Encerrar'}
+                        </button>
+                    )}
+                    {activeSessionId && ended && (
+                        <button type="button" className="session-action" onClick={handleNewSession} title="Começar uma nova sessão">
+                            Nova sessão
+                        </button>
+                    )}
                 </div>
 
                 {/* Right: Window Actions */}
@@ -91,7 +136,7 @@ export const SessionLayout: React.FC<SessionLayoutProps> = ({
                 )}
                 {activeView === 'notes' && (
                     <div className="summary-container-wrapper">
-                        <NotesPanel />
+                        <NotesPanel sessionId={activeSessionId} />
                     </div>
                 )}
                 {activeView === 'summary' && (
@@ -99,7 +144,9 @@ export const SessionLayout: React.FC<SessionLayoutProps> = ({
                         {activeSessionId ? (
                             <SessionSummary sessionId={activeSessionId} />
                         ) : (
-                            <div className="empty-state">Nenhuma sessão ativa</div>
+                            <div className="empty-state">
+                                Nenhuma sessão ativa. Converse, transcreva ou escreva notas para começar uma.
+                            </div>
                         )}
                     </div>
                 )}

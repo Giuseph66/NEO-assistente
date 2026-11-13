@@ -161,3 +161,60 @@
         transform: translateY(0);
     }
 }
+/* Session state + end / new session */
+.header-center {
+    gap: 8px;
+    align-items: center;
+}
+
+.session-badge.ended {
+    color: var(--text-secondary, rgba(255, 255, 255, 0.5));
+}
+
+.session-action {
+    -webkit-app-region: no-drag;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 4px 10px;
+    border-radius: 7px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.05);
+    color: rgba(255, 255, 255, 0.85);
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.session-action:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.session-action.end {
+    border-color: rgba(239, 68, 68, 0.35);
+    color: #fca5a5;
+    background: rgba(239, 68, 68, 0.08);
+}
+
+.session-action.end:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.16);
+}
+
+.session-action:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+@media (max-width: 720px) {
+    .summary-container-wrapper {
+        padding: 20px 16px;
+    }
+}
+
+.session-badge {
+    font-size: 12px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.75);
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.05);
+    font-variant-numeric: tabular-nums;
+}

@@ -581,7 +581,9 @@ app.whenReady().then(async () => {
     registerAIIpc(db);
 
     // Initialize Session IPC
-    registerSessionIpc(db);
+    // Stores the live transcript (mic + system) in the active session and handles
+    // notes, ending and reports.
+    registerSessionIpc(db, { mic: sttController, system: systemSttController });
 
     // Initialize Automation IPC
     registerAutomationIpc();

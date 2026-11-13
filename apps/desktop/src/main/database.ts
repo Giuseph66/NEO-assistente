@@ -25,7 +25,38 @@ export interface AISessionRecord {
   /** Conversation subject (derived from the first user message, renamable). */
   title?: string | null;
   createdAt: number;
+  /** User notes of the session. */
+  notes?: string | null;
+  /** When the session was closed (null = still open). */
+  endedAt?: number | null;
+  /** Generated report (JSON of SessionReport). */
+  reportJson?: string | null;
+  reportGeneratedAt?: number | null;
 }
+
+/** A line of live transcription stored in a session. */
+export interface SessionTranscriptRow {
+  id: number;
+  sessionId: number;
+  source: 'mic' | 'system';
+  text: string;
+  spokenAt: number;
+  createdAt: number;
+}
+
+const mapAISession = (s: any): AISessionRecord => ({
+  id: s.id,
+  screenshotId: s.screenshot_id,
+  providerId: s.provider_id,
+  modelName: s.model_name,
+  summary: s.summary,
+  title: s.title,
+  createdAt: s.created_at,
+  notes: s.notes ?? null,
+  endedAt: s.ended_at ?? null,
+  reportJson: s.report_json ?? null,
+  reportGeneratedAt: s.report_generated_at ?? null,
+});
 
 /** A row of `ai_messages`. Provider/model/timing are set on assistant answers. */
 export interface AIMessageRow {
@@ -602,15 +633,7 @@ export class DatabaseManager {
     const rows = this.db
       .prepare('SELECT * FROM ai_sessions WHERE screenshot_id = ? ORDER BY created_at DESC')
       .all(screenshotId);
-    return (rows as any[]).map((s) => ({
-      id: s.id,
-      screenshotId: s.screenshot_id,
-      providerId: s.provider_id,
-      modelName: s.model_name,
-      summary: s.summary,
-      title: s.title,
-      createdAt: s.created_at,
-    }));
+    return (rows as any[]).map(mapAISession);
   }
 
   /**
@@ -628,6 +651,8 @@ export class DatabaseManager {
           AND (
             s.summary LIKE ? OR 
             s.title LIKE ? OR 
+            s.notes LIKE ? OR 
+            EXISTS (SELECT 1 FROM session_transcripts t WHERE t.session_id = s.id AND t.text LIKE ?) OR 
             s.model_name LIKE ? OR 
             s.provider_id LIKE ? OR 
             m.content LIKE ? OR
@@ -635,22 +660,14 @@ export class DatabaseManager {
           )
           ORDER BY s.created_at DESC
         `)
-        .all(start, end, search, search, search, search, search, search);
+        .all(start, end, search, search, search, search, search, search, search, search);
     } else {
       rows = this.db
         .prepare('SELECT * FROM ai_sessions WHERE created_at >= ? AND created_at <= ? ORDER BY created_at DESC')
         .all(start, end);
     }
 
-    return (rows as any[]).map((s) => ({
-      id: s.id,
-      screenshotId: s.screenshot_id,
-      providerId: s.provider_id,
-      modelName: s.model_name,
-      summary: s.summary,
-      title: s.title,
-      createdAt: s.created_at,
-    }));
+    return (rows as any[]).map(mapAISession);
   }
 
   /**
@@ -659,16 +676,7 @@ export class DatabaseManager {
   getAISessionById(id: number): AISessionRecord | null {
     const row = this.db.prepare('SELECT * FROM ai_sessions WHERE id = ?').get(id);
     if (!row) return null;
-    const s = row as any;
-    return {
-      id: s.id,
-      screenshotId: s.screenshot_id,
-      providerId: s.provider_id,
-      modelName: s.model_name,
-      summary: s.summary,
-      title: s.title,
-      createdAt: s.created_at
-    } as AISessionRecord;
+    return mapAISession(row);
   }
 
   /**
@@ -678,18 +686,86 @@ export class DatabaseManager {
     this.db.prepare('UPDATE ai_sessions SET summary = ? WHERE id = ?').run(summary, id);
   }
 
+  /** Most recent sessions regardless of day (history), optionally filtered by text. */
+  listRecentAISessions(limit: number, searchQuery?: string): AISessionRecord[] {
+    const safeLimit = Math.max(1, Math.min(500, Math.floor(limit) || 100));
+    if (searchQuery) {
+      const search = `%${searchQuery}%`;
+      const rows = this.db
+        .prepare(`
+          SELECT s.* FROM ai_sessions s
+          WHERE s.summary LIKE ? OR s.title LIKE ? OR s.notes LIKE ? OR s.model_name LIKE ?
+            OR EXISTS (SELECT 1 FROM ai_messages m WHERE m.session_id = s.id AND (m.content LIKE ? OR m.recognized_text LIKE ?))
+            OR EXISTS (SELECT 1 FROM session_transcripts t WHERE t.session_id = s.id AND t.text LIKE ?)
+          ORDER BY s.created_at DESC LIMIT ?
+        `)
+        .all(search, search, search, search, search, search, search, safeLimit);
+      return (rows as any[]).map(mapAISession);
+    }
+    const rows = this.db.prepare('SELECT * FROM ai_sessions ORDER BY created_at DESC LIMIT ?').all(safeLimit);
+    return (rows as any[]).map(mapAISession);
+  }
+
+  updateAISessionNotes(id: number, notes: string): void {
+    this.db.prepare('UPDATE ai_sessions SET notes = ? WHERE id = ?').run(notes, id);
+  }
+
+  /** Marks the session closed (keeps the first end time if called twice). */
+  endAISession(id: number, endedAt: number = Date.now()): void {
+    this.db.prepare('UPDATE ai_sessions SET ended_at = COALESCE(ended_at, ?) WHERE id = ?').run(endedAt, id);
+  }
+
+  /** Stores a generated report; `summary` keeps the overview for search and older screens. */
+  saveAISessionReport(id: number, reportJson: string, summary: string, generatedAt: number = Date.now()): void {
+    this.db
+      .prepare('UPDATE ai_sessions SET report_json = ?, report_generated_at = ?, summary = ? WHERE id = ?')
+      .run(reportJson, generatedAt, summary, id);
+  }
+
+  addSessionTranscript(entry: { sessionId: number; source: 'mic' | 'system'; text: string; spokenAt: number }): number {
+    const result = this.db
+      .prepare('INSERT INTO session_transcripts (session_id, source, text, spoken_at, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(entry.sessionId, entry.source, entry.text, entry.spokenAt, Date.now());
+    return result.lastInsertRowid as number;
+  }
+
+  getSessionTranscript(sessionId: number): SessionTranscriptRow[] {
+    const rows = this.db
+      .prepare(
+        'SELECT id, session_id, source, text, spoken_at, created_at FROM session_transcripts WHERE session_id = ? ORDER BY spoken_at ASC, id ASC'
+      )
+      .all(sessionId) as any[];
+    return rows.map((r) => ({
+      id: r.id,
+      sessionId: r.session_id,
+      source: r.source,
+      text: r.text,
+      spokenAt: r.spoken_at,
+      createdAt: r.created_at,
+    }));
+  }
+
+  countSessionTranscript(sessionId: number): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS n FROM session_transcripts WHERE session_id = ?').get(sessionId) as {
+      n: number;
+    };
+    return row.n;
+  }
+
   /**
    * Deleta uma sessão e suas mensagens
    */
   deleteAISession(id: number): void {
     const deleteMessages = this.db.prepare('DELETE FROM ai_messages WHERE session_id = ?');
     const deleteRuns = this.db.prepare('DELETE FROM ai_runs WHERE session_id = ?');
+    const deleteTranscript = this.db.prepare('DELETE FROM session_transcripts WHERE session_id = ?');
     const deleteSession = this.db.prepare('DELETE FROM ai_sessions WHERE id = ?');
 
     // Executa em transação para garantir integridade
     this.db.transaction(() => {
       deleteMessages.run(id);
       deleteRuns.run(id);
+      deleteTranscript.run(id);
       deleteSession.run(id);
     })();
   }

@@ -413,3 +413,113 @@
 .history-tab-content {
     animation: fadeIn 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
+/* Sessions: title, report badge, transcript, notes */
+.session-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
+    text-transform: none;
+}
+
+.status-badge.report {
+    background: rgba(99, 102, 241, 0.15);
+    color: #a5b4fc;
+}
+
+.history-report-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin: 4px 0 14px;
+    flex-wrap: wrap;
+}
+
+.history-action-btn {
+    font-size: 13px;
+    font-weight: 500;
+    padding: 7px 12px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.05);
+    color: #e5e5e5;
+    cursor: pointer;
+}
+
+.history-action-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.history-action-btn.primary {
+    background: #4f46e5;
+    border-color: #4f46e5;
+    color: #fff;
+}
+
+.history-action-btn:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
+.history-report-error {
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    font-size: 13px;
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    color: #fecaca;
+}
+
+.history-transcript {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.history-transcript-line {
+    display: grid;
+    grid-template-columns: 64px 72px 1fr;
+    gap: 8px;
+    align-items: baseline;
+    padding: 7px 10px;
+    border-radius: 8px;
+    border-left: 3px solid transparent;
+    background: rgba(255, 255, 255, 0.02);
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+.history-transcript-line.source-mic { border-left-color: #818cf8; }
+.history-transcript-line.source-system { border-left-color: #2dd4bf; }
+
+.history-transcript-line .speaker {
+    font-weight: 600;
+    font-size: 12px;
+}
+
+.history-transcript-line.source-mic .speaker { color: #a5b4fc; }
+.history-transcript-line.source-system .speaker { color: #5eead4; }
+
+.history-transcript-line .time {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.4);
+    font-variant-numeric: tabular-nums;
+}
+
+.history-transcript-line .text {
+    color: #e5e5e5;
+    word-break: break-word;
+}
+
+.history-notes {
+    white-space: pre-wrap;
+    font-size: 14px;
+    line-height: 1.6;
+    color: #e5e5e5;
+    padding: 16px 18px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+}

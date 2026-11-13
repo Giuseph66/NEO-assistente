@@ -395,6 +395,28 @@ export class AIService {
   }
 
   /**
+   * One model call with the configured provider/model (same key fallback as the chat),
+   * without creating or touching any conversation. Used for session reports.
+   */
+  async complete(
+    messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+    options?: { temperature?: number; maxTokens?: number }
+  ): Promise<{ text: string; providerId: string; modelName: string; durationMs: number }> {
+    const startedAt = Date.now();
+    const { providerId, modelName } = this.config;
+    const response = await this.analyzeTextWithFallback(messages, {
+      temperature: options?.temperature ?? 0.3,
+      maxTokens: options?.maxTokens,
+    } as AnalyzeChatRequest['options']);
+    return {
+      text: response.answerText || '',
+      providerId: response.providerUsed ?? providerId,
+      modelName: response.modelUsed || modelName,
+      durationMs: Date.now() - startedAt,
+    };
+  }
+
+  /**
    * Analisa com fallback automático de keys
    */
   private async analyzeWithFallback(

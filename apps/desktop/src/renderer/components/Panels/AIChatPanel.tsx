@@ -1,13 +1,17 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './AIChatPanel.css';
-import {
-  STTStatus,
-  STTPartialEvent,
-  STTFinalEvent,
-  SystemAudioSourceInfo,
-} from '@neo/shared';
+import { STTStatus, SystemAudioSourceInfo } from '@neo/shared';
 import { GeminiIcon, OpenAIIcon, OllamaIcon, ProviderIcon, ClaudeIcon } from '../Icons';
-import { useSharedInputValue } from '../../store/sharedInputStore';
+import { getSharedInputValue, useSharedInputValue } from '../../store/sharedInputStore';
+import {
+  clearLiveEntries,
+  isActiveStatus,
+  onDictation,
+  replaceLiveEntries,
+  useLiveTranscript,
+} from '../../store/liveTranscriptStore';
+import { MicModeButton } from './MicModeButton';
+import { LiveTranscriptCard } from './LiveTranscriptCard';
 import {
   ChatErrorInfo,
   describeChatError,
@@ -56,7 +60,6 @@ interface AIChatPanelProps {
   sessionId?: number | null;
 }
 
-const defaultStatus: STTStatus = { state: 'idle' };
 
 export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -65,10 +68,14 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // STT States
-  const [systemSttStatus, setSystemSttStatus] = useState<STTStatus>(defaultStatus);
-  const [micSttStatus, setMicSttStatus] = useState<STTStatus>(defaultStatus);
-  const [systemSttPartial, setSystemSttPartial] = useState<string | null>(null);
+  // Mic/system status, routing and the separated transcript live in a shared store
+  // (survives tab switches; the HUD reads the same routing).
+  const live = useLiveTranscript();
+  const systemSttStatus: STTStatus = live.system;
+  const micSttStatus: STTStatus = live.mic;
+  /** Mic preview shown inside the input: dictation only (mic alone). */
   const [micSttPartial, setMicSttPartial] = useState<string | null>(null);
+  const [sttBusy, setSttBusy] = useState(false);
   const [systemSources, setSystemSources] = useState<SystemAudioSourceInfo[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string>('');
   const [sttError, setSttError] = useState<string | null>(null);
@@ -200,12 +207,48 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
         inputResizeRef.current = null;
       }
     };
-  }, [inputValue, systemSttPartial, micSttPartial]);
+  }, [inputValue, micSttPartial]);
 
   // Load initial messages or mock data
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
+
+  // A conversation started here (first message) becomes the window's active session,
+  // so the Notes/Summary tabs and the transcript follow it.
+  useEffect(() => {
+    if (currentSessionId && currentSessionId !== (sessionId || null)) {
+      window.electron?.ipcRenderer.send('session:activate', currentSessionId, 'auto');
+    }
+  }, [currentSessionId, sessionId]);
+
+  // The live transcript card shows what is stored for this session.
+  useEffect(() => {
+    let cancelled = false;
+    if (!sessionId) {
+      replaceLiveEntries([]);
+      return;
+    }
+    (async () => {
+      try {
+        const rows = await window.electron?.ipcRenderer.invoke('session:transcript', sessionId);
+        if (cancelled || !Array.isArray(rows)) return;
+        replaceLiveEntries(
+          rows.map((row: { id: number; source: 'mic' | 'system'; text: string; spokenAt: number }) => ({
+            id: `db-${row.id}`,
+            source: row.source,
+            text: row.text,
+            ts: row.spokenAt,
+          }))
+        );
+      } catch {
+        // keep what is on screen
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
 
   useEffect(() => {
     // Invalidate in-flight loads of the previous conversation and update the ref right away:
@@ -603,111 +646,55 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
     return `${base}${base.endsWith(' ') ? '' : ' '}${suffix}`;
   };
 
-  // STT Microphone listeners
+  // Dictation (mic alone): finals go into the input. Reads the current input from the
+  // store, so two finals arriving back to back never overwrite each other.
   useEffect(() => {
-    if (!window.stt) return;
-    window.stt.getStatus().then((status) => setMicSttStatus(status || defaultStatus));
-    const offStatus = window.stt.onStatus((status) => {
-      setMicSttStatus(status);
-      if (status.state === 'idle' || status.state === 'error') {
-        clearPartialCache('mic');
-        setMicSttPartial(null);
-      }
-    });
-    const offPartial = window.stt.onPartial((event: STTPartialEvent) => {
-      const cleanedText = cleanSttText(event.text);
-      const stableText = getStablePartial('mic', cleanedText);
-      setMicSttPartial(stableText || null);
-      setSttError(null);
-    });
-    const offFinal = window.stt.onFinal((event: STTFinalEvent) => {
-      const cleanedText = cleanSttText(event.text);
-      if (cleanedText.trim()) {
-        const newText = mergeFinalText(inputValue, cleanedText);
-        setInputValue(newText);
-        setMicSttPartial(null);
-        clearPartialCache('mic');
-        // Focus input and move cursor to end
-        setTimeout(() => {
-          if (inputRef.current) {
-            inputRef.current.focus();
-            inputRef.current.setSelectionRange(newText.length, newText.length);
-          }
-        }, 0);
-      } else {
-        setMicSttPartial(null);
-      }
-      setSttError(null);
-    });
-    const offError = window.stt.onError((payload) => {
-      setSttError(payload.message);
+    const offDictation = onDictation((text) => {
+      const newText = mergeFinalText(getSharedInputValue(), text);
+      setInputValue(newText);
       setMicSttPartial(null);
+      clearPartialCache('mic');
+      setSttError(null);
+      setTimeout(() => {
+        if (inputRef.current) {
+          inputRef.current.focus();
+          inputRef.current.setSelectionRange(newText.length, newText.length);
+        }
+      }, 0);
     });
     return () => {
-      offStatus();
-      offPartial();
-      offFinal();
-      offError();
+      offDictation();
     };
-  }, [inputValue]);
+  }, []);
 
-  // STT System listeners
+  // Mic preview in the input only while dictating; in conversation mode it is shown
+  // in the live transcript card instead.
   useEffect(() => {
-    if (!window.systemStt) return;
-    window.systemStt.getStatus().then((status) => setSystemSttStatus(status || defaultStatus));
-    const offStatus = window.systemStt.onStatus((status) => {
-      setSystemSttStatus(status);
-      if (status.state === 'idle') {
-        setSystemSttPartial(null);
-        clearPartialCache('system');
-      }
-      if (status.state === 'error') {
-        setSystemSttPartial(null);
-        clearPartialCache('system');
-      }
-    });
-    const offPartial = window.systemStt.onPartial((event: STTPartialEvent) => {
-      const cleanedText = cleanSttText(event.text);
-      const stableText = getStablePartial('system', cleanedText);
-      setSystemSttPartial(stableText || null);
-      setSttError(null);
-    });
-    const offFinal = window.systemStt.onFinal((event: STTFinalEvent) => {
-      const cleanedText = cleanSttText(event.text);
-      if (cleanedText.trim()) {
-        const newText = mergeFinalText(inputValue, cleanedText);
-        setInputValue(newText);
-        setSystemSttPartial(null);
-        clearPartialCache('system');
-        // Focus input and move cursor to end
-        setTimeout(() => {
-          if (inputRef.current) {
-            inputRef.current.focus();
-            inputRef.current.setSelectionRange(newText.length, newText.length);
-          }
-        }, 0);
-      } else {
-        setSystemSttPartial(null);
-      }
-      setSttError(null);
-    });
-    const offError = window.systemStt.onError((payload) => {
-      setSttError(payload.message);
-      setSystemSttPartial(null);
-    });
+    const raw = live.conversation ? '' : live.partials.mic;
+    if (!raw) {
+      clearPartialCache('mic');
+      setMicSttPartial(null);
+      return;
+    }
+    const stableText = getStablePartial('mic', cleanSttText(raw) || raw);
+    setMicSttPartial(stableText || null);
+    setSttError(null);
+  }, [live.partials.mic, live.conversation]);
+
+  useEffect(() => {
+    const offMicError = window.stt?.onError((payload) => setSttError(payload.message));
+    const offSystemError = window.systemStt?.onError((payload) => setSttError(payload.message));
     return () => {
-      offStatus();
-      offPartial();
-      offFinal();
-      offError();
+      offMicError?.();
+      offSystemError?.();
     };
-  }, [inputValue]);
+  }, []);
 
   // Update cursor position when preview changes
   useEffect(() => {
-    const hasPreview = !!(systemSttPartial || micSttPartial);
+    const hasPreview = !!micSttPartial;
     if (!inputRef.current || !hasPreview) return;
-    const activePartial = systemSttPartial || micSttPartial;
+    const activePartial = micSttPartial;
     const displayValue = inputValue + (inputValue && !inputValue.endsWith(' ') ? ' ' : '') + (activePartial || '');
     // Move cursor to end of preview
     setTimeout(() => {
@@ -715,7 +702,7 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
         inputRef.current.setSelectionRange(displayValue.length, displayValue.length);
       }
     }, 0);
-  }, [systemSttPartial, micSttPartial, inputValue]);
+  }, [micSttPartial, inputValue]);
 
   // STT Control Functions
   const toggleSystemStt = async () => {
@@ -728,7 +715,6 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
       systemSttStatus.state === 'starting';
     if (isRunning) {
       await window.systemStt.stop();
-      setSystemSttPartial(null);
       return;
     }
 
@@ -740,7 +726,6 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
 
     try {
       await window.systemStt.start({ sourceId: resolvedSourceId });
-      setSystemSttPartial(null);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Falha ao iniciar STT do sistema';
       setSttError(message);
@@ -770,18 +755,55 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
     }
   };
 
-  const isSystemSttActive =
-    systemSttStatus.state === 'running' ||
-    systemSttStatus.state === 'listening' ||
-    systemSttStatus.state === 'starting';
-  const isMicSttActive =
-    micSttStatus.state === 'running' ||
-    micSttStatus.state === 'listening' ||
-    micSttStatus.state === 'starting';
+  const isSystemSttActive = isActiveStatus(systemSttStatus);
+  const isMicSttActive = isActiveStatus(micSttStatus);
+
+  const runSttAction = async (action: () => Promise<unknown>) => {
+    if (sttBusy) return;
+    setSttBusy(true);
+    try {
+      await action();
+    } finally {
+      setSttBusy(false);
+    }
+  };
+
+  const stopAllStt = () =>
+    runSttAction(() =>
+      Promise.allSettled([
+        isMicSttActive ? window.stt?.stop() : undefined,
+        isSystemSttActive ? window.systemStt?.stop() : undefined,
+      ])
+    );
+
+  /** Tap on the mic button: start dictation when idle, stop everything otherwise. */
+  const handleMicTap = () => {
+    if (isMicSttActive || isSystemSttActive) {
+      void stopAllStt();
+      return;
+    }
+    void runSttAction(toggleMicStt);
+  };
+
+  /** Appends transcript text to the message field (keeps what is already typed). */
+  const insertIntoInput = (text: string) => {
+    if (!text.trim()) return;
+    const current = getSharedInputValue().trimEnd();
+    const next = current ? `${current}\n${text}` : text;
+    setInputValue(next);
+    setTimeout(() => {
+      if (inputRef.current) {
+        inputRef.current.focus();
+        inputRef.current.setSelectionRange(next.length, next.length);
+      }
+    }, 0);
+  };
+
+  const showLiveTranscript = live.conversation || live.entries.length > 0;
 
   // Get display value for input (show preview if available)
   const getInputDisplayValue = () => {
-    const activePartial = systemSttPartial || micSttPartial;
+    const activePartial = micSttPartial;
     if (activePartial) {
       // Show committed text + preview
       return inputValue + (inputValue && !inputValue.endsWith(' ') ? ' ' : '') + activePartial;
@@ -789,12 +811,12 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
     return inputValue;
   };
 
-  const hasPreview = !!(systemSttPartial || micSttPartial);
+  const hasPreview = !!micSttPartial;
 
   // Sincroniza o texto completo (incluindo parciais do STT) com o main process para o atalho de colar
   // SEM debounce (para testar instantâneo)
   useEffect(() => {
-    const activePartial = systemSttPartial || micSttPartial;
+    const activePartial = micSttPartial;
     const fullText = activePartial
       ? inputValue + (inputValue && !inputValue.endsWith(' ') ? ' ' : '') + activePartial
       : inputValue;
@@ -802,7 +824,7 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
     if (typeof window !== 'undefined' && (window as any).electron?.ipcRenderer) {
       (window as any).electron.ipcRenderer.send('stt-input:update', fullText);
     }
-  }, [inputValue, systemSttPartial, micSttPartial]);
+  }, [inputValue, micSttPartial]);
 
   // Minimize all windows
   const minimizeAllWindows = async () => {
@@ -943,7 +965,6 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
     if (!textToSend && !attachedImage) return;
 
     // Clear previews
-    setSystemSttPartial(null);
     setMicSttPartial(null);
 
     const newMessage: Message = {
@@ -1236,6 +1257,17 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
             </div>
           )}
 
+          {showLiveTranscript && (
+            <LiveTranscriptCard
+              entries={live.entries}
+              partials={live.partials}
+              micActive={isMicSttActive}
+              systemActive={isSystemSttActive}
+              onInsert={insertIntoInput}
+              onClear={clearLiveEntries}
+            />
+          )}
+
           <div className="input-island">
             <div className="input-actions-left" ref={actionMenuRef}>
               <button
@@ -1343,16 +1375,8 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
               ref={inputRef}
               value={getInputDisplayValue()}
               onChange={(e) => {
-                const newValue = e.target.value;
-                const activePartial = systemSttPartial || micSttPartial;
-
-                if (activePartial) {
-                  setSystemSttPartial(null);
-                  setMicSttPartial(null);
-                  setInputValue(newValue);
-                } else {
-                  setInputValue(newValue);
-                }
+                if (micSttPartial) setMicSttPartial(null);
+                setInputValue(e.target.value);
               }}
               onKeyDown={handleKeyDown}
               placeholder="Digite sua mensagem..."
@@ -1361,27 +1385,15 @@ export const AIChatPanel: React.FC<AIChatPanelProps> = ({ sessionId }) => {
             />
 
             <div className="input-actions-right">
-              <button
-                className={`icon-btn mic-btn ${isMicSttActive || isSystemSttActive ? 'active' : ''}`}
-                onClick={isSystemSttActive ? toggleSystemStt : toggleMicStt}
-                title={isMicSttActive || isSystemSttActive ? 'Parar Transcrição' : 'Iniciar Microfone'}
-              >
-                {isSystemSttActive ? (
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
-                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
-                    <line x1="12" y1="19" x2="12" y2="23"></line>
-                    <line x1="8" y1="23" x2="16" y2="23"></line>
-                  </svg>
-                ) : (
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
-                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
-                    <line x1="12" y1="19" x2="12" y2="23"></line>
-                    <line x1="8" y1="23" x2="16" y2="23"></line>
-                  </svg>
-                )}
-              </button>
+              <MicModeButton
+                micActive={isMicSttActive}
+                systemActive={isSystemSttActive}
+                busy={sttBusy}
+                onTap={handleMicTap}
+                onToggleMic={() => void runSttAction(toggleMicStt)}
+                onToggleSystem={() => void runSttAction(toggleSystemStt)}
+                onStopAll={() => void stopAllStt()}
+              />
 
               <button
                 className="send-btn"
